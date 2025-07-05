@@ -1,5 +1,9 @@
 import tkinter as tk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import messagebox, filedialog
+import numpy as np
+from scipy.interpolate import make_interp_spline
 import csv
 
 log_file_path = None
@@ -97,20 +101,156 @@ def extract_data(rows):
     for i in range(len(rows)):
         row = rows[i]
         if any(word in row for word in wordlist):
-            print(rows[i+1:10])
-    run = find_run_probable_range(rows, int(entry_col_rpm.get()))
-    analyse_run(run)
+            run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get()))
+            hp_torque = analyse_run(run)
+            print_graph(hp_torque, graph_canvas)
+            break
 
-def analyse_run(a):
-    for arr in a:
-        line = ""
-        for num in arr:
-            line += str(num)+" "
-        print(line)
+def analyse_run(rows):
+    car_weight = int(entry_mass.get())
+    col_time_i = int(entry_col_time.get())
+    col_rpm_i = int(entry_col_rpm.get())
+    col_speed_i = int(entry_col_speed.get())
+    air_density = float(entry_air_density.get())
+    gravity = float(entry_gravity.get())
+    rolling_coeff = float(entry_crr.get())
+    scx = float(entry_scx.get())
+    drivetrain_loss = float(entry_gearbox_loss.get())
+    final_hp_torque_curve = []
+    for i in range(len(rows)):
+        prev_row = None if i == 0 else rows[i-1]
+        if prev_row is None: continue
+        row = rows[i]
+        delta_time = float(row[col_time_i]) - float(prev_row[col_time_i])
+        prev_speed_ms = float(prev_row[col_speed_i]) / 3.6
+        speed_ms = float(row[col_speed_i]) / 3.6
+        speed_mean = (speed_ms + prev_speed_ms) / 2
+        rpm = int(row[col_rpm_i])
+        delta_speed = speed_ms - prev_speed_ms
+        acceleration = delta_speed / delta_time
+        force = acceleration * car_weight
+        power_kw = force * speed_mean * 0.001
+        whp = power_kw * 1.341
+        air_loss_hp = 0.5 * air_density * scx * speed_ms ** 3 * 0.001 * 1.341
+        rolling_loss_hp = car_weight * rolling_coeff * gravity * speed_ms * 0.001 * 1.341
+        whp_with_losses  = whp + air_loss_hp + rolling_loss_hp
+        crank_hp = whp_with_losses / drivetrain_loss
+        crank_torque = (crank_hp * 7022) / rpm
+        final_hp_torque_curve.append((rpm, crank_hp, crank_torque))
+    return final_hp_torque_curve
+
+
+def print_graph(rpm_hp_torque, graph_canvas_frame):
+    """
+    Plot HP and torque vs RPM on two Y axes in a Tkinter canvas frame,
+    with smoothing, peak labels, and interactive pointer.
+
+    Args:
+        rpm_hp_torque (list of tuple): List of (RPM, HP, Torque) values.
+        graph_canvas_frame (tk.Frame): The Tkinter frame to hold the canvas.
+    """
+    # Clear the frame
+    for widget in graph_canvas_frame.winfo_children():
+        widget.destroy()
+
+    # Extract data
+    rpm = np.array([point[0] for point in rpm_hp_torque])
+    hp = np.array([point[1] for point in rpm_hp_torque])
+    torque = np.array([point[2] for point in rpm_hp_torque])
+
+    # Smoothing
+    if len(rpm) >= 4:
+        rpm_smooth = np.linspace(rpm.min(), rpm.max(), 300)
+        hp_spline = make_interp_spline(rpm, hp, k=3)(rpm_smooth)
+        torque_spline = make_interp_spline(rpm, torque, k=3)(rpm_smooth)
+    else:
+        rpm_smooth = rpm
+        hp_spline = hp
+        torque_spline = torque
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    color_hp = 'tab:red'
+    color_torque = 'tab:blue'
+
+    ax1.set_xlabel('RPM')
+    ax1.set_ylabel('HP', color=color_hp)
+    hp_line, = ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='HP')
+    ax1.tick_params(axis='y', labelcolor=color_hp)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Torque', color=color_torque)
+    torque_line, = ax2.plot(rpm_smooth, torque_spline, color=color_torque, label='Torque')
+    ax2.tick_params(axis='y', labelcolor=color_torque)
+
+    # Peak labels
+    hp_peak_idx = np.argmax(hp_spline)
+    torque_peak_idx = np.argmax(torque_spline)
+    ax1.annotate(f'Peak HP: {hp_spline[hp_peak_idx]:.1f}', 
+                 xy=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx]),
+                 xytext=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx] + 10),
+                 arrowprops=dict(facecolor=color_hp, arrowstyle="->"),
+                 color=color_hp)
+
+    ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f}',
+                 xy=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx]),
+                 xytext=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx] + 10),
+                 arrowprops=dict(facecolor=color_torque, arrowstyle="->"),
+                 color=color_torque)
+
+    # Annot per axis
+    annot_hp = ax1.annotate("", xy=(0,0), xytext=(20,20), textcoords="offset points",
+                            bbox=dict(boxstyle="round", fc="w"),
+                            arrowprops=dict(arrowstyle="->"))
+    annot_hp.set_visible(False)
+
+    annot_torque = ax2.annotate("", xy=(0,0), xytext=(20,20), textcoords="offset points",
+                                bbox=dict(boxstyle="round", fc="w"),
+                                arrowprops=dict(arrowstyle="->"))
+    annot_torque.set_visible(False)
+
+    def on_mouse_move(event):
+        if event.inaxes not in [ax1, ax2]:
+            annot_hp.set_visible(False)
+            annot_torque.set_visible(False)
+            fig.canvas.draw_idle()
+            return
+
+        x = event.xdata
+        if x is None:
+            return
+
+        # Find closest index
+        idx = np.abs(rpm_smooth - x).argmin()
+
+        # Update HP annot
+        annot_hp.xy = (rpm_smooth[idx], hp_spline[idx])
+        annot_hp.set_text(f"HP: {hp_spline[idx]:.1f} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_hp.set_visible(True)
+
+        # Update Torque annot
+        annot_torque.xy = (rpm_smooth[idx], torque_spline[idx])
+        annot_torque.set_text(f"Torque: {torque_spline[idx]:.1f} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_torque.set_visible(True)
+
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", on_mouse_move)
+
+    fig.tight_layout()
+
+    canvas = FigureCanvasTkAgg(fig, master=graph_canvas_frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    plt.close(fig)
+
 
 def find_run_probable_range(rows, rpm_col_idx=2):
     """
-    Find the longest sequence of rows where RPMs continuously increase or stay the same.
+    Find the longest sequence of rows where RPMs continuously increase or stay the same,
+    skipping empty rows or rows with empty RPM.
 
     Args:
         rows (list of list): The data rows (each row is a list of values).
@@ -123,36 +263,51 @@ def find_run_probable_range(rows, rpm_col_idx=2):
     best_end = 0
     best_length = 0
 
-    current_start = 0
+    current_start = None
+    prev_rpm = None
 
-    for i in range(1, len(rows)):
+    for i, row in enumerate(rows):
+        # Skip rows that are empty or with missing RPM
+        if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '':
+            continue
+
         try:
-            prev_rpm = float(rows[i - 1][rpm_col_idx])
-            curr_rpm = float(rows[i][rpm_col_idx])
-        except (ValueError, IndexError):
-            # Skip rows with invalid or missing RPM
+            curr_rpm = float(row[rpm_col_idx])
+        except ValueError:
             continue
 
-        if curr_rpm >= prev_rpm:
-            # continue the current increasing sequence
-            continue
+        if prev_rpm is None:
+            # First valid RPM we find
+            current_start = i
+        elif curr_rpm >= prev_rpm:
+            # RPM continues to rise or stays flat -> keep going
+            pass
         else:
-            # end of current increasing sequence
+            # RPM dropped -> check if this is the best run so far
             current_length = i - current_start
             if current_length > best_length:
                 best_length = current_length
                 best_start = current_start
                 best_end = i
-            # start a new sequence
+            # Start a new run
             current_start = i
 
-    # Check the last sequence
-    current_length = len(rows) - current_start
-    if current_length > best_length:
-        best_start = current_start
-        best_end = len(rows)
+        prev_rpm = curr_rpm
 
-    return rows[best_start:best_end]
+    # Final check after the loop in case the longest run is at the end
+    if current_start is not None:
+        current_length = len(rows) - current_start
+        if current_length > best_length:
+            best_start = current_start
+            best_end = len(rows)
+
+    # Return only rows that are non-empty and have valid RPM in the range
+    result = []
+    for row in rows[best_start:best_end]:
+        if row and len(row) > rpm_col_idx and row[rpm_col_idx] != '':
+            result.append(row)
+
+    return result
 
 def load_log_file():
     global log_file_path
@@ -165,7 +320,7 @@ def load_log_file():
         log_label.config(text="No log file loaded")
 
 root = tk.Tk()
-root.title("Car Parameters Input")
+root.title("VCDS Log Dyno")
 root.geometry("750x780")
 
 tk.Label(root, text="Car mass (kg)").grid(row=0, column=0, sticky="e", padx=5, pady=5)
