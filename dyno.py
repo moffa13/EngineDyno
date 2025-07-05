@@ -9,6 +9,7 @@ import csv
 log_file_path = None
 update_job = None
 last_changed = None  # Will be 'temp' or 'density'
+canvas_widget = None
 
 def temp_to_density(temp_c, humidity):
     T = temp_c + 273.15
@@ -103,7 +104,9 @@ def extract_data(rows):
         if any(word in row for word in wordlist):
             run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get()))
             hp_torque = analyse_run(run)
-            print_graph(hp_torque, graph_canvas)
+            print_graph(hp_torque, graph_frame)
+            param_frame.grid_remove()
+            toggle_btn.config(text="Show parameters")
             break
 
 def analyse_run(rows):
@@ -140,17 +143,20 @@ def analyse_run(rows):
     return final_hp_torque_curve
 
 
-def print_graph(rpm_hp_torque, graph_canvas_frame):
+def print_graph(rpm_hp_torque, graph_frame):
+
+    global canvas_widget
+
     """
     Plot HP and torque vs RPM on two Y axes in a Tkinter canvas frame,
     with smoothing, peak labels, and interactive pointer.
 
     Args:
         rpm_hp_torque (list of tuple): List of (RPM, HP, Torque) values.
-        graph_canvas_frame (tk.Frame): The Tkinter frame to hold the canvas.
+        graph_frame (tk.Frame): The Tkinter frame to hold the canvas.
     """
     # Clear the frame
-    for widget in graph_canvas_frame.winfo_children():
+    for widget in graph_frame.winfo_children():
         widget.destroy()
 
     # Extract data
@@ -210,6 +216,7 @@ def print_graph(rpm_hp_torque, graph_canvas_frame):
                                 arrowprops=dict(arrowstyle="->"))
     annot_torque.set_visible(False)
 
+
     def on_mouse_move(event):
         if event.inaxes not in [ax1, ax2]:
             annot_hp.set_visible(False)
@@ -240,9 +247,12 @@ def print_graph(rpm_hp_torque, graph_canvas_frame):
 
     fig.tight_layout()
 
-    canvas = FigureCanvasTkAgg(fig, master=graph_canvas_frame)
-    canvas.draw()
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+    if canvas_widget:
+        canvas_widget.get_tk_widget().destroy()
+
+    canvas_widget = FigureCanvasTkAgg(fig, master=graph_frame)
+    canvas_widget.draw()
+    canvas_widget.get_tk_widget().pack(fill="both", expand=True)
 
     plt.close(fig)
 
@@ -319,82 +329,114 @@ def load_log_file():
         log_file_path = None
         log_label.config(text="No log file loaded")
 
+def toggle_params():
+    if param_frame.winfo_ismapped():
+        param_frame.grid_remove()
+        toggle_btn.config(text="Show parameters")
+    else:
+        param_frame.grid()
+        toggle_btn.config(text="Hide parameters")
+
+def toggle_params():
+    if param_frame.winfo_ismapped():
+        param_frame.grid_remove()
+        toggle_btn.config(text="Show parameters")
+    else:
+        param_frame.grid()
+        toggle_btn.config(text="Hide parameters")
+
 root = tk.Tk()
 root.title("VCDS Log Dyno")
-root.geometry("750x780")
+root.geometry("750x700")
 
-tk.Label(root, text="Car mass (kg)").grid(row=0, column=0, sticky="e", padx=5, pady=5)
-entry_mass = tk.Entry(root)
+param_frame = tk.LabelFrame(root, text="Parameters", padx=10, pady=10)
+param_frame.grid(row=0, column=0, columnspan=2, sticky="we", padx=10, pady=10)
+
+# FIRST COLUMN
+tk.Label(param_frame, text="Car mass (kg)").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+entry_mass = tk.Entry(param_frame)
 entry_mass.insert(0, "1240")
 entry_mass.grid(row=0, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Air density (kg/m³)").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-density_var = tk.StringVar()
-entry_air_density = tk.Entry(root, textvariable=density_var)
+tk.Label(param_frame, text="Air density (kg/m³)").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+entry_air_density = tk.Entry(param_frame)
 entry_air_density.insert(0, "1.22")
 entry_air_density.grid(row=1, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Temperature (°C)").grid(row=2, column=0, sticky="e", padx=5, pady=5)
-temp_var = tk.StringVar()
-entry_temp = tk.Entry(root, textvariable=temp_var)
+tk.Label(param_frame, text="Temperature (°C)").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+entry_temp = tk.Entry(param_frame)
 entry_temp.insert(0, "15")
 entry_temp.grid(row=2, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Humidity (%)").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-entry_humidity = tk.Entry(root)
+tk.Label(param_frame, text="Humidity (%)").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+entry_humidity = tk.Entry(param_frame)
 entry_humidity.insert(0, "50")
 entry_humidity.grid(row=3, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="SCx").grid(row=4, column=0, sticky="e", padx=5, pady=5)
-entry_scx = tk.Entry(root)
+tk.Label(param_frame, text="SCx").grid(row=4, column=0, sticky="e", padx=5, pady=5)
+entry_scx = tk.Entry(param_frame)
 entry_scx.insert(0, "0.65")
 entry_scx.grid(row=4, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Gearbox loss").grid(row=5, column=0, sticky="e", padx=5, pady=5)
-entry_gearbox_loss = tk.Entry(root)
+tk.Label(param_frame, text="Gearbox loss").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+entry_gearbox_loss = tk.Entry(param_frame)
 entry_gearbox_loss.insert(0, "0.9")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Crr").grid(row=6, column=0, sticky="e", padx=5, pady=5)
-entry_crr = tk.Entry(root)
+# SECOND COLUMN
+tk.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
+entry_crr = tk.Entry(param_frame)
 entry_crr.insert(0, "0.012")
-entry_crr.grid(row=6, column=1, sticky="we", padx=5, pady=5)
+entry_crr.grid(row=0, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Gravity (m/s²)").grid(row=7, column=0, sticky="e", padx=5, pady=5)
-entry_gravity = tk.Entry(root)
+tk.Label(param_frame, text="Gravity (m/s²)").grid(row=1, column=2, sticky="e", padx=5, pady=5)
+entry_gravity = tk.Entry(param_frame)
 entry_gravity.insert(0, "9.81")
-entry_gravity.grid(row=7, column=1, sticky="we", padx=5, pady=5)
+entry_gravity.grid(row=1, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Time stamp column").grid(row=8, column=0, sticky="e", padx=5, pady=5)
-entry_col_time = tk.Entry(root)
+tk.Label(param_frame, text="Time stamp column").grid(row=2, column=2, sticky="e", padx=5, pady=5)
+entry_col_time = tk.Entry(param_frame)
 entry_col_time.insert(0, "1")
-entry_col_time.grid(row=8, column=1, sticky="we", padx=5, pady=5)
+entry_col_time.grid(row=2, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="Vehicle speed column").grid(row=9, column=0, sticky="e", padx=5, pady=5)
-entry_col_speed = tk.Entry(root)
+tk.Label(param_frame, text="Vehicle speed column").grid(row=3, column=2, sticky="e", padx=5, pady=5)
+entry_col_speed = tk.Entry(param_frame)
 entry_col_speed.insert(0, "3")
-entry_col_speed.grid(row=9, column=1, sticky="we", padx=5, pady=5)
+entry_col_speed.grid(row=3, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(root, text="RPM column").grid(row=10, column=0, sticky="e", padx=5, pady=5)
-entry_col_rpm = tk.Entry(root)
+tk.Label(param_frame, text="RPM column").grid(row=4, column=2, sticky="e", padx=5, pady=5)
+entry_col_rpm = tk.Entry(param_frame)
 entry_col_rpm.insert(0, "2")
-entry_col_rpm.grid(row=10, column=1, sticky="we", padx=5, pady=5)
+entry_col_rpm.grid(row=4, column=3, sticky="we", padx=5, pady=5)
 
-tk.Button(root, text="Load log file", command=load_log_file).grid(row=11, column=0, columnspan=2, pady=10)
+for i in range(4):
+    param_frame.columnconfigure(i, weight=1)
+
+# LOAD LOG FILE
+tk.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, pady=10)
 log_label = tk.Label(root, text="No log file loaded", fg="gray", wraplength=700, justify="left")
-log_label.grid(row=12, column=0, columnspan=2, padx=10)
+log_label.grid(row=2, column=0, columnspan=2, padx=10)
 
-tk.Label(root, text="Graph placeholder:").grid(row=13, column=0, columnspan=2)
-graph_canvas = tk.Canvas(root, width=700, height=250, bg="white", relief="sunken", borderwidth=2)
-graph_canvas.grid(row=14, column=0, columnspan=2, padx=10, pady=10)
-
-tk.Button(root, text="Submit", command=submit).grid(row=15, column=0, columnspan=2, pady=20)
-
+graph_frame = tk.Frame(root, relief="sunken", borderwidth=2, bg="white")
+graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+root.rowconfigure(14, weight=1)  # pour que la ligne 14 s'étire
+root.columnconfigure(0, weight=1)
 root.columnconfigure(1, weight=1)
 
-# Bind with info on source
-entry_temp.bind("<KeyRelease>", lambda e: schedule_update('temp'))
-entry_air_density.bind("<KeyRelease>", lambda e: schedule_update('density'))
-entry_humidity.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
+
+
+# SUBMIT + TOGGLE BUTTON
+tk.Button(root, text="Submit", command=submit).grid(row=5, column=0, pady=10)
+toggle_btn = tk.Button(root, text="Hide parameters", command=toggle_params)
+toggle_btn.grid(row=5, column=1, pady=10)
+
+def on_graph_resize(event):
+    if canvas_widget:
+        canvas_widget.get_tk_widget().config(width=event.width, height=event.height)
+        canvas_widget.draw()
+
+
+graph_frame.bind('<Configure>', on_graph_resize)
+
 
 root.mainloop()
