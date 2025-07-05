@@ -4,6 +4,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import messagebox, filedialog
 import numpy as np
 from scipy.interpolate import make_interp_spline
+import tempfile
+import os
+import platform
 import csv
 
 log_file_path = None
@@ -15,17 +18,21 @@ def temp_to_density(temp_c, humidity):
     T = temp_c + 273.15
     es = 6.1078 * 10 ** ((7.5 * temp_c) / (237.3 + temp_c))
     e = es * (humidity / 100.0)
-    p = 1013.25
+    p = float(entry_col_air_pressure.get())
     pd = p - e
     Rd = 287.05
     Rv = 461.495
     rho = ((pd * 100) / (Rd * T)) + ((e * 100) / (Rv * T))
     return round(rho, 4)
 
+# That's weird I agree
 def density_to_temp(density, humidity):
-    for temp_c in range(-40, 50):
-        if abs(temp_to_density(temp_c, humidity) - density) < 0.01:
-            return temp_c
+    for temp_c in np.arange(-273.15, 1000, 0.1):
+        try:
+            if abs(temp_to_density(temp_c, humidity) - density) < 0.001:
+                return temp_c
+        except OverflowError as e:
+            print(e)
     return None
 
 def schedule_update(source):
@@ -45,7 +52,7 @@ def apply_update():
         try:
             temp_c = float(entry_temp.get())
             rho = temp_to_density(temp_c, humidity)
-            density_var.set(str(rho))
+            entry_density_var.set(str(rho))
         except:
             pass
     elif last_changed == 'density':
@@ -53,7 +60,7 @@ def apply_update():
             rho = float(entry_air_density.get())
             temp_c_calc = density_to_temp(rho, humidity)
             if temp_c_calc is not None:
-                temp_var.set(str(temp_c_calc))
+                entry_temp_var.set(str(temp_c_calc))
         except:
             pass
 
@@ -142,6 +149,27 @@ def analyse_run(rows):
         final_hp_torque_curve.append((rpm, crank_hp, crank_torque))
     return final_hp_torque_curve
 
+def print_graph_to_printer():
+    if not canvas_widget:
+        return
+    
+    # Save graph to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmpfile:
+        canvas_widget.figure.savefig(tmpfile.name)
+        tmpfile_path = tmpfile.name
+
+    # Send to printer based on OS
+    if platform.system() == 'Windows':
+        # On Windows use start command with /print
+        os.startfile(tmpfile_path, 'print')
+    elif platform.system() == 'Darwin':
+        # macOS
+        os.system(f'lpr "{tmpfile_path}"')
+    elif platform.system() == 'Linux':
+        # Linux
+        os.system(f'lpr "{tmpfile_path}"')
+    else:
+        print("Unsupported OS for direct printing")
 
 def print_graph(rpm_hp_torque, graph_frame):
 
@@ -255,7 +283,7 @@ def print_graph(rpm_hp_torque, graph_frame):
     canvas_widget.get_tk_widget().pack(fill="both", expand=True)
 
     plt.close(fig)
-
+    print_button.grid()
 
 def find_run_probable_range(rows, rpm_col_idx=2):
     """
@@ -359,18 +387,21 @@ entry_mass.insert(0, "1240")
 entry_mass.grid(row=0, column=1, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="Air density (kg/m³)").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-entry_air_density = tk.Entry(param_frame)
-entry_air_density.insert(0, "1.22")
+entry_density_var = tk.StringVar()
+entry_air_density = tk.Entry(param_frame, textvariable=entry_density_var)
+entry_density_var.set("1.1755")
 entry_air_density.grid(row=1, column=1, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="Temperature (°C)").grid(row=2, column=0, sticky="e", padx=5, pady=5)
-entry_temp = tk.Entry(param_frame)
-entry_temp.insert(0, "15")
+entry_temp_var = tk.StringVar()
+entry_temp = tk.Entry(param_frame, textvariable=entry_temp_var)
+entry_temp_var.set("25")
 entry_temp.grid(row=2, column=1, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="Humidity (%)").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-entry_humidity = tk.Entry(param_frame)
-entry_humidity.insert(0, "50")
+entry_humidity_var = tk.StringVar()
+entry_humidity = tk.Entry(param_frame, textvariable=entry_humidity_var)
+entry_humidity_var.set("60")
 entry_humidity.grid(row=3, column=1, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="SCx").grid(row=4, column=0, sticky="e", padx=5, pady=5)
@@ -380,7 +411,7 @@ entry_scx.grid(row=4, column=1, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="Gearbox loss").grid(row=5, column=0, sticky="e", padx=5, pady=5)
 entry_gearbox_loss = tk.Entry(param_frame)
-entry_gearbox_loss.insert(0, "0.9")
+entry_gearbox_loss.insert(0, "0.87")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
 
 # SECOND COLUMN
@@ -409,6 +440,12 @@ entry_col_rpm = tk.Entry(param_frame)
 entry_col_rpm.insert(0, "2")
 entry_col_rpm.grid(row=4, column=3, sticky="we", padx=5, pady=5)
 
+
+tk.Label(param_frame, text="Air pressure (hPa)").grid(row=5, column=2, sticky="e", padx=5, pady=5)
+entry_col_air_pressure = tk.Entry(param_frame)
+entry_col_air_pressure.insert(0, "1013.25")
+entry_col_air_pressure.grid(row=5, column=3, sticky="we", padx=5, pady=5)
+
 for i in range(4):
     param_frame.columnconfigure(i, weight=1)
 
@@ -430,6 +467,10 @@ tk.Button(root, text="Submit", command=submit).grid(row=5, column=0, pady=10)
 toggle_btn = tk.Button(root, text="Hide parameters", command=toggle_params)
 toggle_btn.grid(row=5, column=1, pady=10)
 
+print_button = tk.Button(root, text="Print Graph", command=print_graph_to_printer)
+print_button.grid(row=15, column=1, pady=20, sticky="w")
+print_button.grid_remove()  # Start hidden
+
 def on_graph_resize(event):
     if canvas_widget:
         canvas_widget.get_tk_widget().config(width=event.width, height=event.height)
@@ -437,6 +478,9 @@ def on_graph_resize(event):
 
 
 graph_frame.bind('<Configure>', on_graph_resize)
-
+entry_temp.bind("<KeyRelease>", lambda e: schedule_update('temp'))
+entry_air_density.bind("<KeyRelease>", lambda e: schedule_update('density'))
+entry_humidity.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
+entry_col_air_pressure.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
 
 root.mainloop()
