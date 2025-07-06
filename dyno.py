@@ -66,20 +66,30 @@ def apply_update():
 
 def submit():
     try:
+        rows = []
         if log_file_path:
             try:
                 with open(log_file_path, newline='') as csvfile:
                     reader = csv.reader(csvfile)
                     rows = list(reader)
-                    if rows:
-                        extract_data(rows)
-                    else:
-                        messagebox.showinfo("Submission Result", f"\n\nLog file is empty")
             except Exception as e:
                 messagebox.showinfo("Submission Result", f"\n\nError reading log file: {e}")
+                return
         else:
             messagebox.showinfo("Submission Result", "\n\nNo log file loaded.")
+            return
 
+        run = []
+        if rows:
+            run = extract_data(rows)
+        else:
+            messagebox.showinfo("Submission Result", f"\n\nNo viable data found")
+            return
+        hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
+        print_graph(hp_torque, graph_frame) # Will plot
+        param_frame.grid_remove()
+        toggle_btn.config(text="Show parameters")
+    
     except ValueError:
         messagebox.showerror("Error", "Please enter valid numeric values.")
 
@@ -90,11 +100,8 @@ def extract_data(rows):
         row = rows[i]
         if any(word in row for word in wordlist):
             run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get())) # Will get the run range
-            hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
-            print_graph(hp_torque, graph_frame) # Will plot
-            param_frame.grid_remove()
-            toggle_btn.config(text="Show parameters")
-            break
+            return run
+    return None
 
 def analyse_run(rows):
     car_weight = int(entry_mass.get())
@@ -257,15 +264,28 @@ def print_graph(rpm_hp_torque, graph_frame):
     hp = np.array([point[1] for point in rpm_hp_torque])
     torque = np.array([point[2] for point in rpm_hp_torque])
 
+
+    # I want for ex 100 points per 1000 rpm
+    npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
+
+    def moving_average(y, window_size=5):
+        return np.convolve(y, np.ones(window_size)/window_size, mode='same')
+    
+    if smooth_var.get():
+        hp = moving_average(hp)
+        torque = moving_average(torque)
+
     # Smoothing
-    if len(rpm) >= 4:
-        rpm_smooth = np.linspace(rpm.min(), rpm.max(), 300)
+    if len(rpm) >= 4 and interpolate_var.get():
+        rpm_smooth = np.linspace(rpm.min(), rpm.max(), npoints)
         hp_spline = make_interp_spline(rpm, hp, k=3)(rpm_smooth)
         torque_spline = make_interp_spline(rpm, torque, k=3)(rpm_smooth)
     else:
         rpm_smooth = rpm
         hp_spline = hp
         torque_spline = torque
+
+    
 
     # Plot
     fig, ax1 = plt.subplots(figsize=(8, 5))
@@ -487,6 +507,18 @@ din_var = tk.BooleanVar()
 din_var.set(True)
 din_checkbox = tk.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
 din_checkbox.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+
+# Apply smoothing checkbox
+smooth_var = tk.BooleanVar()
+smooth_var.set(True)
+smooth_checkbox = tk.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var)
+smooth_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+
+# Apply point interpolation checkbox
+interpolate_var = tk.BooleanVar()
+interpolate_var.set(True)
+interpolate_checkbox = tk.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
+interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # SECOND COLUMN
 tk.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
