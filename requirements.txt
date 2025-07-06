@@ -1,0 +1,5 @@
+ttkbootstrap
+matplotlib
+numpy
+scipy
+Pillow

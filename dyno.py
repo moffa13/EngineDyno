@@ -1,4 +1,6 @@
 import tkinter as tk
+import ttkbootstrap as ttkb
+from ttkbootstrap.constants import *
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import messagebox, filedialog
@@ -440,7 +442,7 @@ def load_log_file():
     file_path = filedialog.askopenfilename(title="Select log file", filetypes=[("CSV or log files", "*.csv *.log *.txt"), ("All files", "*.*")])
     if file_path:
         log_file_path = file_path
-        log_label.config(text=f"Loaded: {file_path}")
+        log_label.config(text=f"Loaded: {file_path}", bootstyle="success")
     else:
         log_file_path = None
         log_label.config(text="No log file loaded")
@@ -461,94 +463,95 @@ def toggle_params():
         param_frame.grid()
         toggle_btn.config(text="Hide parameters")
 
-root = tk.Tk()
+root = ttkb.Window(themename="superhero")
 root.title("VCDS Log Dyno")
 root.geometry("750x700")
 
-param_frame = tk.LabelFrame(root, text="Parameters", padx=10, pady=10)
+param_frame = ttkb.LabelFrame(root, text="Parameters")
+param_frame.pack(padx=10, pady=10)
 param_frame.grid(row=0, column=0, columnspan=2, sticky="we", padx=10, pady=10)
 
 # FIRST COLUMN
-tk.Label(param_frame, text="Car mass (kg)").grid(row=0, column=0, sticky="e", padx=5, pady=5)
-entry_mass = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Car mass (kg)").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+entry_mass = ttkb.Entry(param_frame)
 entry_mass.insert(0, "1240")
 entry_mass.grid(row=0, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Air density (kg/m³)").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-entry_density_var = tk.StringVar()
-entry_air_density = tk.Entry(param_frame, textvariable=entry_density_var)
+ttkb.Label(param_frame, text="Air density (kg/m³)").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+entry_density_var = ttkb.StringVar()
+entry_air_density = ttkb.Entry(param_frame, textvariable=entry_density_var)
 entry_density_var.set("1.1755")
 entry_air_density.grid(row=1, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Temperature (°C)").grid(row=2, column=0, sticky="e", padx=5, pady=5)
-entry_temp_var = tk.StringVar()
-entry_temp = tk.Entry(param_frame, textvariable=entry_temp_var)
+ttkb.Label(param_frame, text="Temperature (°C)").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+entry_temp_var = ttkb.StringVar()
+entry_temp = ttkb.Entry(param_frame, textvariable=entry_temp_var)
 entry_temp_var.set("25")
 entry_temp.grid(row=2, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Humidity (%)").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-entry_humidity_var = tk.StringVar()
-entry_humidity = tk.Entry(param_frame, textvariable=entry_humidity_var)
+ttkb.Label(param_frame, text="Humidity (%)").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+entry_humidity_var = ttkb.StringVar()
+entry_humidity = ttkb.Entry(param_frame, textvariable=entry_humidity_var)
 entry_humidity_var.set("60")
 entry_humidity.grid(row=3, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="SCx").grid(row=4, column=0, sticky="e", padx=5, pady=5)
-entry_scx = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="SCx").grid(row=4, column=0, sticky="e", padx=5, pady=5)
+entry_scx = ttkb.Entry(param_frame)
 entry_scx.insert(0, "0.65")
 entry_scx.grid(row=4, column=1, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Gearbox loss").grid(row=5, column=0, sticky="e", padx=5, pady=5)
-entry_gearbox_loss = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Gearbox loss").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+entry_gearbox_loss = ttkb.Entry(param_frame)
 entry_gearbox_loss.insert(0, "0.87")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
 
 # Apply DIN correction checkbox
-din_var = tk.BooleanVar()
+din_var = ttkb.BooleanVar()
 din_var.set(True)
-din_checkbox = tk.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
+din_checkbox = ttkb.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
 din_checkbox.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply smoothing checkbox
-smooth_var = tk.BooleanVar()
+smooth_var = ttkb.BooleanVar()
 smooth_var.set(True)
-smooth_checkbox = tk.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var)
+smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var)
 smooth_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply point interpolation checkbox
-interpolate_var = tk.BooleanVar()
+interpolate_var = ttkb.BooleanVar()
 interpolate_var.set(True)
-interpolate_checkbox = tk.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
+interpolate_checkbox = ttkb.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
 interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # SECOND COLUMN
-tk.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
-entry_crr = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
+entry_crr = ttkb.Entry(param_frame)
 entry_crr.insert(0, "0.019")
 entry_crr.grid(row=0, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Gravity (m/s²)").grid(row=1, column=2, sticky="e", padx=5, pady=5)
-entry_gravity = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Gravity (m/s²)").grid(row=1, column=2, sticky="e", padx=5, pady=5)
+entry_gravity = ttkb.Entry(param_frame)
 entry_gravity.insert(0, "9.81")
 entry_gravity.grid(row=1, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Time stamp column").grid(row=2, column=2, sticky="e", padx=5, pady=5)
-entry_col_time = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Time stamp column").grid(row=2, column=2, sticky="e", padx=5, pady=5)
+entry_col_time = ttkb.Entry(param_frame)
 entry_col_time.insert(0, "1")
 entry_col_time.grid(row=2, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="Vehicle speed column").grid(row=3, column=2, sticky="e", padx=5, pady=5)
-entry_col_speed = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Vehicle speed column").grid(row=3, column=2, sticky="e", padx=5, pady=5)
+entry_col_speed = ttkb.Entry(param_frame)
 entry_col_speed.insert(0, "3")
 entry_col_speed.grid(row=3, column=3, sticky="we", padx=5, pady=5)
 
-tk.Label(param_frame, text="RPM column").grid(row=4, column=2, sticky="e", padx=5, pady=5)
-entry_col_rpm = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="RPM column").grid(row=4, column=2, sticky="e", padx=5, pady=5)
+entry_col_rpm = ttkb.Entry(param_frame)
 entry_col_rpm.insert(0, "2")
 entry_col_rpm.grid(row=4, column=3, sticky="we", padx=5, pady=5)
 
 
-tk.Label(param_frame, text="Air pressure (hPa)").grid(row=5, column=2, sticky="e", padx=5, pady=5)
-entry_col_air_pressure = tk.Entry(param_frame)
+ttkb.Label(param_frame, text="Air pressure (hPa)").grid(row=5, column=2, sticky="e", padx=5, pady=5)
+entry_col_air_pressure = ttkb.Entry(param_frame)
 entry_col_air_pressure.insert(0, "1013.25")
 entry_col_air_pressure.grid(row=5, column=3, sticky="we", padx=5, pady=5)
 
@@ -556,11 +559,11 @@ for i in range(4):
     param_frame.columnconfigure(i, weight=1)
 
 # LOAD LOG FILE
-tk.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, pady=10)
-log_label = tk.Label(root, text="No log file loaded", fg="gray", wraplength=700, justify="left")
+ttkb.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, pady=10)
+log_label = ttkb.Label(root, text="No log file loaded", bootstyle="danger", wraplength=700, justify="left")
 log_label.grid(row=2, column=0, columnspan=2, padx=10)
 
-graph_frame = tk.Frame(root, relief="sunken", borderwidth=2, bg="white")
+graph_frame = ttkb.Frame(root, relief="sunken", borderwidth=2, bootstyle="primary")
 graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
 root.rowconfigure(14, weight=1)  # pour que la ligne 14 s'étire
 root.columnconfigure(0, weight=1)
@@ -569,11 +572,11 @@ root.columnconfigure(1, weight=1)
 
 
 # SUBMIT + TOGGLE BUTTON
-tk.Button(root, text="Submit", command=submit).grid(row=5, column=0, pady=10)
-toggle_btn = tk.Button(root, text="Hide parameters", command=toggle_params)
+ttkb.Button(root, text="Submit", command=submit).grid(row=5, column=0, pady=10)
+toggle_btn = ttkb.Button(root, text="Hide parameters", command=toggle_params)
 toggle_btn.grid(row=5, column=1, pady=10)
 
-print_button = tk.Button(root, text="Print Graph", command=print_graph_to_printer)
+print_button = ttkb.Button(root, text="Print Graph", command=print_graph_to_printer)
 print_button.grid(row=15, column=1, pady=20, sticky="w")
 print_button.grid_remove()  # Start hidden
 

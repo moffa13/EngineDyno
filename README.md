@@ -35,6 +35,7 @@ Run the program and carefully set all parameters to accurate values.
 
 ---
 
+
 ## VCDS Column Mapping
 
 The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
@@ -56,6 +57,19 @@ The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
   → See: [https://en.wikipedia.org/wiki/Rolling_resistance](https://en.wikipedia.org/wiki/Rolling_resistance)
 
 ---
+
+## How to Run the Program
+
+To get started with the EngineDyno program, follow these steps:
+
+1. **Install Dependencies**  
+   Before running the program, you need to install the required dependencies. In the project folder, you should find a `requirements.txt` file. To install the necessary packages, run the following command in your terminal:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Run the Program**
+   After installing the dependencies, you can execute the program. Make sure to adjust the parameters (such as temperature, air pressure, and rolling resistance) to your actual conditions for accurate results.
 
 Enjoy.  
 
