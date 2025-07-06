@@ -46,6 +46,11 @@ The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
 
 ⚠️ **Be careful to have all data in the same group** — otherwise, data retrieval could lead to inconsistencies (e.g. not reading RPM at the same time as vehicle speed).
 
+## Auto deduce speed from RPM
+
+If you do not have the speed data recorded into your log, you can check the "Deduce speed from RPM" option
+to automatically retrieve the vehicle speed based on tire info along with gear and differential ratios.
+
 ---
 
 ## Definitions

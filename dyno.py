@@ -12,6 +12,8 @@ import os
 import platform
 import csv
 from PIL import Image, ImageDraw, ImageFont
+import re
+import math
 
 log_file_path = None
 update_job = None
@@ -66,6 +68,29 @@ def apply_update():
         except:
             pass
 
+
+def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=20000, max_speed=500, check_speed=True):
+
+    for row in rows:
+        try:
+            time = float(row[time_col_idx])
+            rpm = float(row[rpm_col_idx])
+            if check_speed:
+                speed = float(row[speed_col_idx])
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Invalid row data or format: {row} - {e}")
+
+        if time < 0:
+            raise ValueError(f"Negative time found: {time} in row {row}")
+        if rpm < 0:
+            raise ValueError(f"Negative RPM found: {rpm} in row {row}")
+        if check_speed and speed < 0:
+            raise ValueError(f"Negative speed found: {rpm} in row {row}")
+        if rpm > max_rpm:
+            raise ValueError(f"Unrealistically high RPM found: {rpm} in row {row}")
+        if check_speed and speed > max_speed:
+            raise ValueError(f"Unrealistically high speed found: {rpm} in row {row}")
+
 def submit():
     try:
         rows = []
@@ -83,17 +108,40 @@ def submit():
 
         run = []
         if rows:
-            run = extract_data(rows)
+            run = run_remove_duplicates(extract_data(rows), int(entry_col_rpm.get()))
         else:
-            messagebox.showinfo("Submission Result", f"\n\nNo viable data found")
+            messagebox.showinfo("Submission Result", f"\n\nNo data found")
             return
-        hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
-        print_graph(hp_torque, graph_frame) # Will plot
+        
+        try:
+            if run:
+                validate_rows(run, int(entry_col_time.get()), int(entry_col_rpm.get()), int(entry_col_speed.get()), check_speed=not deduce_var.get())
+            else:
+                messagebox.showinfo("Submission Result", f"\n\nNo VCDS log data found")
+                return
+        except ValueError as e:
+            messagebox.showerror("Submission Result", e)
+            return
+
+        try:
+            if run: 
+                hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
+            else:
+                messagebox.showinfo("Submission Result", f"\n\nNo VCDS log data found")
+        except ValueError as e:
+            messagebox.showinfo("Submission Result", e)
+                
+
+        if hp_torque:
+            print_graph(hp_torque, graph_frame) # Will plot
+        else:
+            messagebox.showinfo("Submission Result", f"\n\nNo viable data found, check column parameters")
         param_frame.grid_remove()
         toggle_btn.config(text="Show parameters")
     
-    except ValueError:
+    except ValueError as e:
         messagebox.showerror("Error", "Please enter valid numeric values.")
+        print(e)
 
 # this function will find when the real data actually starts
 def extract_data(rows):
@@ -125,10 +173,15 @@ def analyse_run(rows):
 
         # All the cool calculated values in order to extract two values, rpm and hp => torque
         delta_time = float(row[col_time_i]) - float(prev_row[col_time_i])
-        prev_speed_ms = float(prev_row[col_speed_i]) / 3.6
-        speed_ms = float(row[col_speed_i]) / 3.6
+        prev_rpm = int(float(prev_row[col_rpm_i]))
+        rpm = int(float(row[col_rpm_i]))
+        if deduce_var.get():
+            prev_speed_ms = get_speed_from_rpm(prev_rpm) / 3.6
+            speed_ms = get_speed_from_rpm(rpm) / 3.6
+        else:
+            prev_speed_ms = float(prev_row[col_speed_i]) / 3.6
+            speed_ms = float(row[col_speed_i]) / 3.6
         speed_mean = (speed_ms + prev_speed_ms) / 2
-        rpm = int(row[col_rpm_i])
         delta_speed = speed_ms - prev_speed_ms
         acceleration = delta_speed / delta_time
         force = acceleration * car_weight
@@ -222,6 +275,51 @@ def print_graph_to_printer():
         os.system(f'lpr "{combined_path}"')
     else:
         print("Unsupported OS for direct printing")
+
+def parse_tire_size(tire_str):
+    """
+    Parses a tire size string (e.g. '205/45 R16') and returns (width_mm, aspect_ratio, diameter_inch)
+    
+    :param tire_str: str, e.g. '205/45 R16' or '195/65R15'
+    :return: tuple (width_mm, aspect_ratio, diameter_inch)
+    :raises: ValueError if format is invalid
+    """
+    # Normalize the string
+    tire_str = tire_str.strip().upper()
+    
+    # Regex to match formats like 205/45R16 or 205/45 R16
+    pattern = r"^(\d{2,3})/(\d{1,2})\s*R(\d{1,2})$"
+    match = re.match(pattern, tire_str)
+    
+    if not match:
+        raise ValueError(f"Invalid tire size format: '{tire_str}'. Expected format '205/45 R16'")
+    
+    width = int(match.group(1))
+    aspect = int(match.group(2))
+    diameter = int(match.group(3))
+    
+    return width, aspect, diameter
+
+def wheel_perimeter_cm(width_mm, aspect_ratio, rim_diameter_inch):
+    sidewall = width_mm * (aspect_ratio / 100)
+    rim_dia_mm = rim_diameter_inch * 25.4
+    total_dia_mm = rim_dia_mm + 2 * sidewall
+    perimeter_mm = math.pi * total_dia_mm
+    return perimeter_mm / 10  # mm to cm
+
+def get_speed_from_rpm(rpm):
+
+    width, aspect, diameter = parse_tire_size(entry_tire.get())
+    gear_ratio = float(entry_gearbox_ratio.get())
+    diff_ratio = float(entry_diff_ratio.get())
+
+    perim = wheel_perimeter_cm(width, aspect, diameter)
+
+    final_ratio = gear_ratio * diff_ratio
+
+    speed = rpm / final_ratio * perim * 60 /100000
+
+    return speed
 
 def apply_din_correction(hp_measured, torque_measured, temp_c, pressure_mbar):
     """
@@ -372,6 +470,21 @@ def print_graph(rpm_hp_torque, graph_frame):
     plt.close(fig)
     print_button.grid()
 
+def run_remove_duplicates(rows, rpm_col_idx=2):
+
+    if not rows: return None
+
+    # To remove duplicates and keep the first occurrence of each RPM
+    unique_data = []
+    seen_rpms = set()
+
+    for row in rows:
+        rpm = row[rpm_col_idx]
+        if rpm not in seen_rpms:
+            unique_data.append(row)
+            seen_rpms.add(rpm)
+    return unique_data
+
 def find_run_probable_range(rows, rpm_col_idx=2):
     """
     Find the longest sequence of rows where RPMs continuously increase or stay the same,
@@ -445,7 +558,7 @@ def load_log_file():
         log_label.config(text=f"Loaded: {file_path}", bootstyle="success")
     else:
         log_file_path = None
-        log_label.config(text="No log file loaded")
+        log_label.config(text="No log file loaded", bootstyle='warning')
 
 def toggle_params():
     if param_frame.winfo_ismapped():
@@ -465,7 +578,7 @@ def toggle_params():
 
 root = ttkb.Window(themename="superhero")
 root.title("VCDS Log Dyno")
-root.geometry("750x700")
+root.geometry("1000x850")
 
 param_frame = ttkb.LabelFrame(root, text="Parameters")
 param_frame.pack(padx=10, pady=10)
@@ -505,23 +618,55 @@ entry_gearbox_loss = ttkb.Entry(param_frame)
 entry_gearbox_loss.insert(0, "0.87")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
 
+def toggle_deduce_fields():
+    state = "normal" if deduce_var.get() else "disabled"
+    entry_tire.config(state=state)
+    entry_gearbox_ratio.config(state=state)
+    entry_diff_ratio.config(state=state)
+    entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
+
+
+# --- Tire info field ---
+ttkb.Label(param_frame, text="Tire size (e.g. 205/45 R16)").grid(row=6, column=0, sticky="e", padx=5, pady=5)
+entry_tire = ttkb.Entry(param_frame)
+entry_tire.insert(0, "205/45 R16")
+entry_tire.grid(row=6, column=1, sticky="we", padx=5, pady=5)
+
+# --- Gearbox ratio field ---
+ttkb.Label(param_frame, text="Gearbox ratio").grid(row=7, column=0, sticky="e", padx=5, pady=5)
+entry_gearbox_ratio = ttkb.Entry(param_frame)
+entry_gearbox_ratio.insert(0, "1.324")
+entry_gearbox_ratio.grid(row=7, column=1, sticky="we", padx=5, pady=5)
+
+# --- Differential ratio field ---
+ttkb.Label(param_frame, text="Differential ratio").grid(row=8, column=0, sticky="e", padx=5, pady=5)
+entry_diff_ratio = ttkb.Entry(param_frame)
+entry_diff_ratio.insert(0, "3.238")
+entry_diff_ratio.grid(row=8, column=1, sticky="we", padx=5, pady=5)
+
 # Apply DIN correction checkbox
 din_var = ttkb.BooleanVar()
 din_var.set(True)
 din_checkbox = ttkb.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
-din_checkbox.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+din_checkbox.grid(row=8, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply smoothing checkbox
 smooth_var = ttkb.BooleanVar()
 smooth_var.set(True)
 smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var)
-smooth_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+smooth_checkbox.grid(row=7, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply point interpolation checkbox
 interpolate_var = ttkb.BooleanVar()
 interpolate_var.set(True)
 interpolate_checkbox = ttkb.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
 interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+
+deduce_var = ttkb.BooleanVar(value=False)
+deduce_checkbox = ttkb.Checkbutton(
+    param_frame, text="Deduce speed from RPM", variable=deduce_var, command=toggle_deduce_fields
+)
+deduce_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
 
 # SECOND COLUMN
 ttkb.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
@@ -560,10 +705,10 @@ for i in range(4):
 
 # LOAD LOG FILE
 ttkb.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, pady=10)
-log_label = ttkb.Label(root, text="No log file loaded", bootstyle="danger", wraplength=700, justify="left")
+log_label = ttkb.Label(root, text="No log file loaded", bootstyle="warning", wraplength=700, justify="left")
 log_label.grid(row=2, column=0, columnspan=2, padx=10)
 
-graph_frame = ttkb.Frame(root, relief="sunken", borderwidth=2, bootstyle="primary")
+graph_frame = ttkb.Frame(root, relief="solid", borderwidth=2, bootstyle="default")
 graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
 root.rowconfigure(14, weight=1)  # pour que la ligne 14 s'étire
 root.columnconfigure(0, weight=1)
@@ -585,6 +730,9 @@ def on_graph_resize(event):
         canvas_widget.get_tk_widget().config(width=event.width, height=event.height)
         canvas_widget.draw()
 
+entry_tire.config(state="disabled")
+entry_gearbox_ratio.config(state="disabled")
+entry_diff_ratio.config(state="disabled")
 
 graph_frame.bind('<Configure>', on_graph_resize)
 entry_temp.bind("<KeyRelease>", lambda e: schedule_update('temp'))
