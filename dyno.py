@@ -122,6 +122,8 @@ def analyse_run(rows):
     col_rpm_i = int(entry_col_rpm.get())
     col_speed_i = int(entry_col_speed.get())
     air_density = float(entry_air_density.get())
+    air_temp = float(entry_temp.get())
+    air_pressure_mbar = float(entry_col_air_pressure.get())
     gravity = float(entry_gravity.get())
     rolling_coeff = float(entry_crr.get())
     scx = float(entry_scx.get())
@@ -146,6 +148,12 @@ def analyse_run(rows):
         whp_with_losses  = whp + air_loss_hp + rolling_loss_hp
         crank_hp = whp_with_losses / drivetrain_loss
         crank_torque = (crank_hp * 7022) / rpm
+
+        if din_var.get():
+            crank_hp, crank_torque = apply_din_correction(
+                crank_hp, crank_torque, air_temp, air_pressure_mbar
+            )
+
         final_hp_torque_curve.append((rpm, crank_hp, crank_torque))
     return final_hp_torque_curve
 
@@ -170,6 +178,28 @@ def print_graph_to_printer():
         os.system(f'lpr "{tmpfile_path}"')
     else:
         print("Unsupported OS for direct printing")
+
+def apply_din_correction(hp_measured, torque_measured, temp_c, pressure_mbar):
+    """
+    Apply DIN 70020 correction to measured HP and torque.
+
+    :param hp_measured: measured horsepower
+    :param torque_measured: measured torque
+    :param temp_c: measured temperature (°C)
+    :param pressure_mbar: measured atmospheric pressure (mbar)
+    :return: tuple (hp_corrected, torque_corrected)
+    """
+    T0 = 293  # K (20°C)
+    p0 = 1013  # mbar
+
+    T = temp_c + 273.15  # Convert to K
+
+    correction_factor = (p0 / pressure_mbar) * (T / T0) ** 0.5
+
+    hp_corrected = hp_measured * correction_factor
+    torque_corrected = torque_measured * correction_factor
+
+    return hp_corrected, torque_corrected
 
 def print_graph(rpm_hp_torque, graph_frame):
 
@@ -303,11 +333,13 @@ def find_run_probable_range(rows, rpm_col_idx=2):
 
     current_start = None
     prev_rpm = None
+    i = 0
 
     for i, row in enumerate(rows):
+        
         # Skip rows that are empty or with missing RPM
         if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '':
-            continue
+            break
 
         try:
             curr_rpm = float(row[rpm_col_idx])
@@ -334,11 +366,12 @@ def find_run_probable_range(rows, rpm_col_idx=2):
 
     # Final check after the loop in case the longest run is at the end
     if current_start is not None:
-        current_length = len(rows) - current_start
+        current_length = i - current_start
         if current_length > best_length:
             best_start = current_start
-            best_end = len(rows)
+            best_end = i
 
+    # That code is mostly useless, I don't see why there could be an invalid row in between data
     # Return only rows that are non-empty and have valid RPM in the range
     result = []
     for row in rows[best_start:best_end]:
@@ -414,10 +447,16 @@ entry_gearbox_loss = tk.Entry(param_frame)
 entry_gearbox_loss.insert(0, "0.87")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
 
+# Apply DIN correction checkbox
+din_var = tk.BooleanVar()
+din_var.set(True)
+din_checkbox = tk.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
+din_checkbox.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+
 # SECOND COLUMN
 tk.Label(param_frame, text="Crr").grid(row=0, column=2, sticky="e", padx=5, pady=5)
 entry_crr = tk.Entry(param_frame)
-entry_crr.insert(0, "0.012")
+entry_crr.insert(0, "0.019")
 entry_crr.grid(row=0, column=3, sticky="we", padx=5, pady=5)
 
 tk.Label(param_frame, text="Gravity (m/s²)").grid(row=1, column=2, sticky="e", padx=5, pady=5)
