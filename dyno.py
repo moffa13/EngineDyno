@@ -4,6 +4,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import messagebox, filedialog
 import numpy as np
 from scipy.interpolate import make_interp_spline
+from scipy.optimize import root_scalar
 import tempfile
 import os
 import platform
@@ -25,14 +26,12 @@ def temp_to_density(temp_c, humidity):
     rho = ((pd * 100) / (Rd * T)) + ((e * 100) / (Rv * T))
     return round(rho, 4)
 
-# That's weird I agree
 def density_to_temp(density, humidity):
-    for temp_c in np.arange(-273.15, 1000, 0.1):
-        try:
-            if abs(temp_to_density(temp_c, humidity) - density) < 0.001:
-                return temp_c
-        except OverflowError as e:
-            print(e)
+    def f(temp_c):
+        return temp_to_density(temp_c, humidity) - density
+    sol = root_scalar(f, bracket=(-50, 200), method='brentq')
+    if sol.converged:
+        return sol.root
     return None
 
 def schedule_update(source):
@@ -66,26 +65,6 @@ def apply_update():
 
 def submit():
     try:
-        mass = float(entry_mass.get())
-        air_density = float(entry_air_density.get())
-        scx = float(entry_scx.get())
-        gearbox_loss = float(entry_gearbox_loss.get())
-        crr = float(entry_crr.get())
-        gravity = float(entry_gravity.get())
-        col_time = entry_col_time.get()
-        col_speed = entry_col_speed.get()
-        col_rpm = entry_col_rpm.get()
-
-        info_text = (f"Mass = {mass} kg\n"
-                     f"Air density = {air_density} kg/m³\n"
-                     f"SCx = {scx}\n"
-                     f"Gearbox loss = {gearbox_loss}\n"
-                     f"Crr = {crr}\n"
-                     f"Gravity = {gravity} m/s²\n"
-                     f"Time stamp column: {col_time}\n"
-                     f"Vehicle speed column: {col_speed}\n"
-                     f"RPM column: {col_rpm}")
-
         if log_file_path:
             try:
                 with open(log_file_path, newline='') as csvfile:
@@ -109,9 +88,9 @@ def extract_data(rows):
     for i in range(len(rows)):
         row = rows[i]
         if any(word in row for word in wordlist):
-            run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get()))
-            hp_torque = analyse_run(run)
-            print_graph(hp_torque, graph_frame)
+            run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get())) # Will get the run range
+            hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
+            print_graph(hp_torque, graph_frame) # Will plot
             param_frame.grid_remove()
             toggle_btn.config(text="Show parameters")
             break
@@ -133,6 +112,8 @@ def analyse_run(rows):
         prev_row = None if i == 0 else rows[i-1]
         if prev_row is None: continue
         row = rows[i]
+
+        # All the cool calculated values in order to extract two values, rpm and hp => torque
         delta_time = float(row[col_time_i]) - float(prev_row[col_time_i])
         prev_speed_ms = float(prev_row[col_speed_i]) / 3.6
         speed_ms = float(row[col_speed_i]) / 3.6
@@ -149,6 +130,7 @@ def analyse_run(rows):
         crank_hp = whp_with_losses / drivetrain_loss
         crank_torque = (crank_hp * 7022) / rpm
 
+        # Apply DIN 70020 if needed
         if din_var.get():
             crank_hp, crank_torque = apply_din_correction(
                 crank_hp, crank_torque, air_temp, air_pressure_mbar
@@ -240,12 +222,12 @@ def print_graph(rpm_hp_torque, graph_frame):
 
     ax1.set_xlabel('RPM')
     ax1.set_ylabel('HP', color=color_hp)
-    hp_line, = ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='HP')
+    ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='HP')
     ax1.tick_params(axis='y', labelcolor=color_hp)
 
     ax2 = ax1.twinx()
     ax2.set_ylabel('Torque', color=color_torque)
-    torque_line, = ax2.plot(rpm_smooth, torque_spline, color=color_torque, label='Torque')
+    ax2.plot(rpm_smooth, torque_spline, color=color_torque, label='Torque')
     ax2.tick_params(axis='y', labelcolor=color_torque)
 
     # Peak labels
