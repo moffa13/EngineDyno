@@ -9,6 +9,7 @@ import tempfile
 import os
 import platform
 import csv
+from PIL import Image, ImageDraw, ImageFont
 
 log_file_path = None
 update_job = None
@@ -140,24 +141,76 @@ def analyse_run(rows):
     return final_hp_torque_curve
 
 def print_graph_to_printer():
-    if not canvas_widget:
+    if not canvas_widget or not param_frame:
         return
     
-    # Save graph to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmpfile:
-        canvas_widget.figure.savefig(tmpfile.name)
-        tmpfile_path = tmpfile.name
+    # Step 1: Save graph as PNG
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_graph:
+        canvas_widget.figure.savefig(tmp_graph.name, bbox_inches='tight')
+        graph_path = tmp_graph.name
+    
+    # Step 2: Generate text image from param_frame contents
+    # Extract text from param_frame widgets (labels/entries)
+    param_text = ""
+    for child in param_frame.winfo_children():
+        if hasattr(child, 'cget'):
+            text = child.cget('text')
+            if not text.startswith('PY_') and text != '':
+                param_text += f'{text}: '
+            if 'DIN' in text:
+                param_text += 'yes' if din_var.get() else 'no'
+                param_text += "\n"
+        if hasattr(child, 'get'):
+            try:
+                value = child.get()
+                param_text += str(value) + "\n"
+            except:
+                pass
+        print(param_text)
 
-    # Send to printer based on OS
+    # Create image for text
+    font = ImageFont.load_default()
+    lines = param_text.strip().split('\n')
+    
+    # Get text bounding box to calculate width and height
+    width = 0
+    line_height = 0
+    for line in lines:
+        bbox = font.getbbox(line)
+        line_width = bbox[2] - bbox[0]
+        width = max(width, line_width)
+        line_height = max(line_height, bbox[3] - bbox[1])
+    
+    height = line_height * len(lines) + 20
+    text_img = Image.new('RGB', (width + 20, height), color='white')
+    draw = ImageDraw.Draw(text_img)
+    
+    y = 10
+    for line in lines:
+        draw.text((10, y), line, font=font, fill='black')
+        y += line_height
+    
+    # Step 3: Combine text image and graph image vertically
+    graph_img = Image.open(graph_path)
+    total_width = max(text_img.width, graph_img.width)
+    total_height = text_img.height + graph_img.height
+    combined_img = Image.new('RGB', (total_width, total_height), color='white')
+    
+    combined_img.paste(text_img, (0, 0))
+    combined_img.paste(graph_img, (0, text_img.height))
+    
+    # Save combined image
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_combined:
+        combined_img.save(tmp_combined.name)
+        combined_path = tmp_combined.name
+
+    # Step 4: Print
     if platform.system() == 'Windows':
-        # On Windows use start command with /print
-        os.startfile(tmpfile_path, 'print')
+        os.startfile(combined_path, 'print')
     elif platform.system() == 'Darwin':
-        # macOS
-        os.system(f'lpr "{tmpfile_path}"')
+        os.system(f'lpr "{combined_path}"')
     elif platform.system() == 'Linux':
-        # Linux
-        os.system(f'lpr "{tmpfile_path}"')
+        os.system(f'lpr "{combined_path}"')
     else:
         print("Unsupported OS for direct printing")
 
