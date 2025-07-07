@@ -500,10 +500,21 @@ def find_run_probable_range(rows, rpm_col_idx=2):
     best_start = 0
     best_end = 0
     best_length = 0
-
+    best_diff = 0
     current_start = None
     prev_rpm = None
     i = 0
+    min_rpm = 0
+
+    def is_run_better():
+        is_rpm_diff_acceptable = rpm_diff > 800
+        is_rpm_diff_bigger_than_best = rpm_diff > best_diff
+        is_run_larger_than_best = current_length > best_length
+        min_correct_run_size = max(15, rpm_diff / 200) 
+        return is_rpm_diff_acceptable and (
+            (is_rpm_diff_bigger_than_best and is_run_larger_than_best) or 
+            (is_rpm_diff_bigger_than_best and current_length >= min_correct_run_size)
+        )
 
     for i, row in enumerate(rows):
         
@@ -519,14 +530,17 @@ def find_run_probable_range(rows, rpm_col_idx=2):
         if prev_rpm is None:
             # First valid RPM we find
             current_start = i
+            min_rpm = curr_rpm
         elif curr_rpm >= prev_rpm:
             # RPM continues to rise or stays flat -> keep going
             pass
         else:
             # RPM dropped -> check if this is the best run so far
             current_length = i - current_start
-            if current_length > best_length:
+            rpm_diff = curr_rpm - min_rpm
+            if is_run_better():
                 best_length = current_length
+                best_diff = rpm_diff
                 best_start = current_start
                 best_end = i
             # Start a new run
@@ -535,11 +549,10 @@ def find_run_probable_range(rows, rpm_col_idx=2):
         prev_rpm = curr_rpm
 
     # Final check after the loop in case the longest run is at the end
-    if current_start is not None:
-        current_length = i - current_start
-        if current_length > best_length:
-            best_start = current_start
-            best_end = i
+    current_length = i - current_start
+    if current_start is not None and is_run_better():
+        best_start = current_start
+        best_end = i
 
     # That code is mostly useless, I don't see why there could be an invalid row in between data
     # Return only rows that are non-empty and have valid RPM in the range
