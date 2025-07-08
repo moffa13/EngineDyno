@@ -1,4 +1,5 @@
 import ttkbootstrap as ttkb
+from tkinter import StringVar
 from ttkbootstrap.constants import *
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -18,6 +19,7 @@ log_file_path = None
 update_job = None
 last_changed = None  # Will be 'temp' or 'density'
 canvas_widget = None
+all_valid_runs = None
 
 def temp_to_density(temp_c, humidity):
     T = temp_c + 273.15
@@ -76,21 +78,59 @@ def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=
             rpm = float(row[rpm_col_idx])
             if check_speed:
                 speed = float(row[speed_col_idx])
-        except (ValueError, IndexError) as e:
-            raise ValueError(f"Invalid row data or format: {row} - {e}")
+        except (ValueError, IndexError):
+            return False
 
         if time < 0:
-            raise ValueError(f"Negative time found: {time} in row {row}")
+            return False
         if rpm < 0:
-            raise ValueError(f"Negative RPM found: {rpm} in row {row}")
+            return False
         if check_speed and speed < 0:
-            raise ValueError(f"Negative speed found: {rpm} in row {row}")
+            return False
         if rpm > max_rpm:
-            raise ValueError(f"Unrealistically high RPM found: {rpm} in row {row}")
+            return False
         if check_speed and speed > max_speed:
-            raise ValueError(f"Unrealistically high speed found: {rpm} in row {row}")
+            return False
+    return True
+
+def on_select_run(combo):
+    index = combo.widget.current()
+    select_run(index)
+
+def select_run(index):
+    run = all_valid_runs[index]
+
+    hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
+    print_graph(hp_torque, graph_frame) # Will plot        
+    param_frame.grid_remove()
+    toggle_btn.config(text="Show parameters")
+
+def find_best_run(runs, rpm_col_idx=2):
+    if len(runs) == 0: return None
+    def score(run):
+        rpms = [float(r[rpm_col_idx]) for r in run]
+        return (max(rpms) - min(rpms)) * (len(run) ** 0.5)
+    
+    return max(range(len(runs)), key=lambda i: score(runs[i]))
+
+def is_valid_rpm(value):
+    try:
+        rpm = float(value)
+        return rpm > 0  # Or >= 0 depending on what you want
+    except (ValueError, TypeError):
+        return False
+
+def sanitize_run(run, rpm_col_idx):
+    ret = [
+        row for row in run
+        if len(row) > rpm_col_idx and is_valid_rpm(row[rpm_col_idx])
+    ]
+    return ret
 
 def submit():
+
+    global all_valid_runs
+
     try:
         rows = []
         if log_file_path:
@@ -105,52 +145,38 @@ def submit():
             messagebox.showinfo("Submission Result", "\n\nNo log file loaded.")
             return
 
-        run = []
+        runs = []
+        rpm_col_idx = int(entry_col_rpm.get())
+        
         if rows:
-            run = run_remove_duplicates(extract_data(rows), int(entry_col_rpm.get()))
+            runs = find_probable_runs(rows[i+1:], rpm_col_idx=rpm_col_idx) # Will get the run range
         else:
             messagebox.showinfo("Submission Result", f"\n\nNo data found")
             return
         
-        try:
-            if run:
-                validate_rows(run, int(entry_col_time.get()), int(entry_col_rpm.get()), int(entry_col_speed.get()), check_speed=not deduce_var.get())
-            else:
-                messagebox.showinfo("Submission Result", f"\n\nNo VCDS log data found")
-                return
-        except ValueError as e:
-            messagebox.showerror("Submission Result", e)
-            return
+       
 
-        try:
-            if run: 
-                hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
-            else:
-                messagebox.showinfo("Submission Result", f"\n\nNo VCDS log data found")
-        except ValueError as e:
-            messagebox.showinfo("Submission Result", e)
-                
+        all_valid_runs = list(filter(lambda x: validate_rows(
+            x, int(entry_col_time.get()), rpm_col_idx, int(entry_col_speed.get()), check_speed=not deduce_var.get()
+        ), runs))
 
-        if hp_torque:
-            print_graph(hp_torque, graph_frame) # Will plot
-        else:
-            messagebox.showinfo("Submission Result", f"\n\nNo viable data found, check column parameters")
-        param_frame.grid_remove()
-        toggle_btn.config(text="Show parameters")
+        best_index = find_best_run(all_valid_runs, rpm_col_idx)
+        
+        run_summaries = [
+            f"Run {i+1}: {len(run)} points, RPM {int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}"
+            for i, run in enumerate(all_valid_runs)
+        ]
+
+        run_selector['values'] = run_summaries
+        run_selector_var.set(run_summaries[best_index] if run_summaries else "No valid runs")
+
+        if best_index is not None:
+            select_run(best_index)
+        
     
     except ValueError as e:
         messagebox.showerror("Error", "Please enter valid numeric values.")
         print(e)
-
-# this function will find when the real data actually starts
-def extract_data(rows):
-    wordlist = ['Marker', 'STAMP', '/min', '°BTDC', '°KW']
-    for i in range(len(rows)):
-        row = rows[i]
-        if any(word in row for word in wordlist):
-            run = find_run_probable_range(rows[i+1:], int(entry_col_rpm.get())) # Will get the run range
-            return run
-    return None
 
 def analyse_run(rows):
     car_weight = int(entry_mass.get())
@@ -367,6 +393,8 @@ def print_graph(rpm_hp_torque, graph_frame):
     npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
 
     def moving_average(y, window_size=5):
+        if len(y) < window_size:
+            return y
         return np.convolve(y, np.ones(window_size)/window_size, mode='same')
     
     if smooth_var.get():
@@ -483,42 +511,16 @@ def run_remove_duplicates(rows, rpm_col_idx=2):
             seen_rpms.add(rpm)
     return unique_data
 
-def find_run_probable_range(rows, rpm_col_idx=2):
-    """
-    Find the longest sequence of rows where RPMs continuously increase or stay the same,
-    skipping empty rows or rows with empty RPM.
-
-    Args:
-        rows (list of list): The data rows (each row is a list of values).
-        rpm_col_idx (int): The index of the RPM column.
-
-    Returns:
-        list of list: The subset of rows representing the probable run.
-    """
-    best_start = 0
-    best_end = 0
-    best_length = 0
-    best_diff = 0
+def find_probable_runs(rows, rpm_col_idx=2, min_run_size=8):
+    runs = []
     current_start = None
     prev_rpm = None
-    i = 0
-    min_rpm = 0
-
-    def is_run_better():
-        is_rpm_diff_acceptable = rpm_diff > 800
-        is_rpm_diff_bigger_than_best = rpm_diff > best_diff
-        is_run_larger_than_best = current_length > best_length
-        min_correct_run_size = max(15, rpm_diff / 200) 
-        return is_rpm_diff_acceptable and (
-            (is_rpm_diff_bigger_than_best and is_run_larger_than_best) or 
-            (is_rpm_diff_bigger_than_best and current_length >= min_correct_run_size)
-        )
-
     for i, row in enumerate(rows):
         
         # Skip rows that are empty or with missing RPM
         if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '':
-            break
+            current_start = i
+            continue
 
         try:
             curr_rpm = float(row[rpm_col_idx])
@@ -526,41 +528,27 @@ def find_run_probable_range(rows, rpm_col_idx=2):
             continue
 
         if prev_rpm is None:
-            # First valid RPM we find
             current_start = i
-            min_rpm = curr_rpm
         elif curr_rpm >= prev_rpm:
             # RPM continues to rise or stays flat -> keep going
             pass
         else:
-            # RPM dropped -> check if this is the best run so far
-            current_length = i - current_start
-            rpm_diff = curr_rpm - min_rpm
-            if is_run_better():
-                best_length = current_length
-                best_diff = rpm_diff
-                best_start = current_start
-                best_end = i
-            # Start a new run
+            size = i - current_start
+            if size >= min_run_size:
+                run_no_dup = run_remove_duplicates(sanitize_run(rows[current_start:i], rpm_col_idx), rpm_col_idx)
+                if len(run_no_dup) >= min_run_size:
+                    runs.append(run_no_dup)
             current_start = i
-            min_rpm = curr_rpm
 
         prev_rpm = curr_rpm
 
-    # Final check after the loop in case the longest run is at the end
-    current_length = i - current_start
-    if current_start is not None and is_run_better():
-        best_start = current_start
-        best_end = i
+    size = i - current_start + 1
+    if size >= min_run_size:
+        run_no_dup = run_remove_duplicates(sanitize_run(rows[current_start:i+1], rpm_col_idx), rpm_col_idx)
+        if len(run_no_dup) >= min_run_size:
+            runs.append(run_no_dup)
 
-    # That code is mostly useless, I don't see why there could be an invalid row in between data
-    # Return only rows that are non-empty and have valid RPM in the range
-    result = []
-    for row in rows[best_start:best_end]:
-        if row and len(row) > rpm_col_idx and row[rpm_col_idx] != '':
-            result.append(row)
-
-    return result
+    return runs
 
 def load_log_file():
     global log_file_path
@@ -568,6 +556,7 @@ def load_log_file():
     if file_path:
         log_file_path = file_path
         log_label.config(text=f"Loaded: {file_path}", bootstyle="success")
+        submit()
     else:
         log_file_path = None
         log_label.config(text="No log file loaded", bootstyle='warning')
@@ -722,6 +711,11 @@ log_label.grid(row=2, column=0, columnspan=2, padx=10)
 
 graph_frame = ttkb.Frame(root, relief="solid", borderwidth=2, bootstyle="default")
 graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+
+run_selector_var = StringVar()
+run_selector = ttkb.Combobox(root, textvariable=run_selector_var, state="readonly")
+run_selector.grid(row=6, column=0, columnspan=2, sticky="we", padx=10, pady=5)
+
 root.rowconfigure(14, weight=1)  # pour que la ligne 14 s'étire
 root.columnconfigure(0, weight=1)
 root.columnconfigure(1, weight=1)
@@ -729,7 +723,6 @@ root.columnconfigure(1, weight=1)
 
 
 # SUBMIT + TOGGLE BUTTON
-ttkb.Button(root, text="Submit", command=submit).grid(row=5, column=0, pady=10)
 toggle_btn = ttkb.Button(root, text="Hide parameters", command=toggle_params)
 toggle_btn.grid(row=5, column=1, pady=10)
 
@@ -751,5 +744,6 @@ entry_temp.bind("<KeyRelease>", lambda e: schedule_update('temp'))
 entry_air_density.bind("<KeyRelease>", lambda e: schedule_update('density'))
 entry_humidity.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
 entry_col_air_pressure.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
+run_selector.bind("<<ComboboxSelected>>", on_select_run)
 
 root.mainloop()
