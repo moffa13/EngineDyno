@@ -1,4 +1,3 @@
-import tkinter as tk
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 import matplotlib.pyplot as plt
@@ -228,7 +227,6 @@ def print_graph_to_printer():
                 param_text += str(value) + "\n"
             except:
                 pass
-        print(param_text)
 
     # Create image for text
     font = ImageFont.load_default()
@@ -406,13 +404,13 @@ def print_graph(rpm_hp_torque, graph_frame):
     # Peak labels
     hp_peak_idx = np.argmax(hp_spline)
     torque_peak_idx = np.argmax(torque_spline)
-    ax1.annotate(f'Peak HP: {hp_spline[hp_peak_idx]:.1f}', 
+    ax1.annotate(f'Peak power: {hp_spline[hp_peak_idx]:.1f} HP @ {rpm_smooth[hp_peak_idx]:.0f} rpm', 
                  xy=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx]),
                  xytext=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx] + 10),
                  arrowprops=dict(facecolor=color_hp, arrowstyle="->"),
                  color=color_hp)
 
-    ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f}',
+    ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f}Nm @ {rpm_smooth[torque_peak_idx]:.0f} rpm',
                  xy=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx]),
                  xytext=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx] + 10),
                  arrowprops=dict(facecolor=color_torque, arrowstyle="->"),
@@ -440,7 +438,7 @@ def print_graph(rpm_hp_torque, graph_frame):
         x = event.xdata
         if x is None:
             return
-
+        
         # Find closest index
         idx = np.abs(rpm_smooth - x).argmin()
 
@@ -545,6 +543,7 @@ def find_run_probable_range(rows, rpm_col_idx=2):
                 best_end = i
             # Start a new run
             current_start = i
+            min_rpm = curr_rpm
 
         prev_rpm = curr_rpm
 
