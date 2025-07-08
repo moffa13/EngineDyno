@@ -93,9 +93,10 @@ def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=
             return False
     return True
 
-def on_select_run(combo):
-    index = combo.widget.current()
-    select_run(index)
+def on_select_run(e=None):
+    index = run_selector.current()
+    if index >= 0:
+        select_run(index)
 
 def select_run(index):
     run = all_valid_runs[index]
@@ -392,7 +393,7 @@ def print_graph(rpm_hp_torque, graph_frame):
     # I want for ex 100 points per 1000 rpm
     npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
 
-    def moving_average(y, window_size=5):
+    def moving_average(y, window_size=2):
         if len(y) < window_size:
             return y
         return np.convolve(y, np.ones(window_size)/window_size, mode='same')
@@ -569,13 +570,12 @@ def toggle_params():
         param_frame.grid()
         toggle_btn.config(text="Hide parameters")
 
-def toggle_params():
-    if param_frame.winfo_ismapped():
-        param_frame.grid_remove()
-        toggle_btn.config(text="Show parameters")
-    else:
-        param_frame.grid()
-        toggle_btn.config(text="Hide parameters")
+def toggle_deduce_fields():
+    state = "normal" if deduce_var.get() else "disabled"
+    entry_tire.config(state=state)
+    entry_gearbox_ratio.config(state=state)
+    entry_diff_ratio.config(state=state)
+    entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
 
 root = ttkb.Window(themename="superhero")
 root.title("VCDS Log Dyno")
@@ -618,14 +618,6 @@ ttkb.Label(param_frame, text="Gearbox loss").grid(row=5, column=0, sticky="e", p
 entry_gearbox_loss = ttkb.Entry(param_frame)
 entry_gearbox_loss.insert(0, "0.87")
 entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
-
-def toggle_deduce_fields():
-    state = "normal" if deduce_var.get() else "disabled"
-    entry_tire.config(state=state)
-    entry_gearbox_ratio.config(state=state)
-    entry_diff_ratio.config(state=state)
-    entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
-
 
 # --- Tire info field ---
 ttkb.Label(param_frame, text="Tire size (e.g. 205/45 R16)").grid(row=6, column=0, sticky="e", padx=5, pady=5)
@@ -722,7 +714,8 @@ root.columnconfigure(1, weight=1)
 
 
 
-# SUBMIT + TOGGLE BUTTON
+# RELOAD + TOGGLE BUTTON
+ttkb.Button(root, text="Reload", command=on_select_run).grid(row=5, column=0, pady=10)
 toggle_btn = ttkb.Button(root, text="Hide parameters", command=toggle_params)
 toggle_btn.grid(row=5, column=1, pady=10)
 
