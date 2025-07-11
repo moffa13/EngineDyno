@@ -102,7 +102,8 @@ def select_run(index):
     run = all_valid_runs[index]
 
     hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
-    print_graph(hp_torque, graph_frame) # Will plot        
+    
+    print_graph(hp_torque, graph_frame, int(window_size_var.get())) # Will plot        
     param_frame.grid_remove()
     toggle_btn.config(text="Show parameters")
 
@@ -143,28 +144,31 @@ def submit():
                 messagebox.showinfo("Submission Result", f"\n\nError reading log file: {e}")
                 return
         else:
-            messagebox.showinfo("Submission Result", "\n\nNo log file loaded.")
+            messagebox.showinfo("Submission Result", "No log file loaded.")
             return
 
         runs = []
         rpm_col_idx = int(entry_col_rpm.get())
+        time_col_idx = int(entry_col_time.get())
         
         if rows:
-            runs = find_probable_runs(rows[i+1:], rpm_col_idx=rpm_col_idx) # Will get the run range
+            runs = find_probable_runs(rows, rpm_col_idx=rpm_col_idx) # Will get the run range
         else:
-            messagebox.showinfo("Submission Result", f"\n\nNo data found")
+            messagebox.showinfo("Submission Result", "File is empty.")
             return
         
        
 
         all_valid_runs = list(filter(lambda x: validate_rows(
-            x, int(entry_col_time.get()), rpm_col_idx, int(entry_col_speed.get()), check_speed=not deduce_var.get()
+            x, time_col_idx, rpm_col_idx, int(entry_col_speed.get()), check_speed=not deduce_var.get()
         ), runs))
 
         best_index = find_best_run(all_valid_runs, rpm_col_idx)
         
         run_summaries = [
-            f"Run {i+1}: {len(run)} points, RPM {int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}"
+            f"Run {i+1}: {len(run)} points, "
+            f"RPM {int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}, "
+            f"{(max(float(r[time_col_idx]) for r in run) - min(float(r[time_col_idx]) for r in run)):.1f} s"
             for i, run in enumerate(all_valid_runs)
         ]
 
@@ -212,20 +216,25 @@ def analyse_run(rows):
         acceleration = delta_speed / delta_time
         force = acceleration * car_weight
         power_kw = force * speed_mean * 0.001
-        whp = power_kw * 1.341
-        air_loss_hp = 0.5 * air_density * scx * speed_ms ** 3 * 0.001 * 1.341
-        rolling_loss_hp = car_weight * rolling_coeff * gravity * speed_ms * 0.001 * 1.341
-        whp_with_losses  = whp + air_loss_hp + rolling_loss_hp
-        crank_hp = whp_with_losses / drivetrain_loss
-        crank_torque = (crank_hp * 7022) / rpm
+        air_loss_kw = 0.5 * air_density * scx * speed_ms ** 3 * 0.001
+        rolling_loss_kw = car_weight * rolling_coeff * gravity * speed_ms * 0.001
+        power_with_losses  = power_kw + air_loss_kw + rolling_loss_kw
+        crank_power = power_with_losses / drivetrain_loss
+        crank_torque_Nm = (crank_power * 9549.29) / rpm
+        crank_torque = crank_torque_Nm
+        if use_imperial.get(): # HP, lb.ft
+            crank_torque = crank_torque_Nm * 0.73756
+            crank_power = crank_power * 1.34102
+        else: # PS, Nm
+            crank_power = crank_power * 1.35962
 
         # Apply DIN 70020 if needed
         if din_var.get():
-            crank_hp, crank_torque = apply_din_correction(
-                crank_hp, crank_torque, air_temp, air_pressure_mbar
+            crank_power, crank_torque = apply_din_correction(
+                crank_power, crank_torque, air_temp, air_pressure_mbar
             )
 
-        final_hp_torque_curve.append((rpm, crank_hp, crank_torque))
+        final_hp_torque_curve.append((rpm, crank_power, crank_torque))
     return final_hp_torque_curve
 
 def print_graph_to_printer():
@@ -368,7 +377,7 @@ def apply_din_correction(hp_measured, torque_measured, temp_c, pressure_mbar):
 
     return hp_corrected, torque_corrected
 
-def print_graph(rpm_hp_torque, graph_frame):
+def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
 
     global canvas_widget
 
@@ -393,14 +402,14 @@ def print_graph(rpm_hp_torque, graph_frame):
     # I want for ex 100 points per 1000 rpm
     npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
 
-    def moving_average(y, window_size=2):
+    def moving_average(y, window_size):
         if len(y) < window_size:
             return y
         return np.convolve(y, np.ones(window_size)/window_size, mode='same')
     
     if smooth_var.get():
-        hp = moving_average(hp)
-        torque = moving_average(torque)
+        hp = moving_average(hp, smoothing_window_size)
+        torque = moving_average(torque, smoothing_window_size)
 
     # Smoothing
     if len(rpm) >= 4 and interpolate_var.get():
@@ -421,8 +430,8 @@ def print_graph(rpm_hp_torque, graph_frame):
     color_torque = 'tab:blue'
 
     ax1.set_xlabel('RPM')
-    ax1.set_ylabel('HP', color=color_hp)
-    ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='HP')
+    ax1.set_ylabel('Power', color=color_hp)
+    ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='Power')
     ax1.tick_params(axis='y', labelcolor=color_hp)
 
     ax2 = ax1.twinx()
@@ -433,13 +442,19 @@ def print_graph(rpm_hp_torque, graph_frame):
     # Peak labels
     hp_peak_idx = np.argmax(hp_spline)
     torque_peak_idx = np.argmax(torque_spline)
-    ax1.annotate(f'Peak power: {hp_spline[hp_peak_idx]:.1f} HP @ {rpm_smooth[hp_peak_idx]:.0f} rpm', 
+
+    power_unit = 'HP' if use_imperial.get() else 'PS'
+    torque_unit = 'lb-ft' if use_imperial.get() else 'Nm'
+
+    ax1.annotate(f'Peak power: {hp_spline[hp_peak_idx]:.1f} {power_unit} @ {rpm_smooth[hp_peak_idx]:.0f} RPM', 
                  xy=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx]),
                  xytext=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx] + 10),
                  arrowprops=dict(facecolor=color_hp, arrowstyle="->"),
                  color=color_hp)
 
-    ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f}Nm @ {rpm_smooth[torque_peak_idx]:.0f} rpm',
+    
+
+    ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f} {torque_unit} @ {rpm_smooth[torque_peak_idx]:.0f} RPM',
                  xy=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx]),
                  xytext=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx] + 10),
                  arrowprops=dict(facecolor=color_torque, arrowstyle="->"),
@@ -473,12 +488,12 @@ def print_graph(rpm_hp_torque, graph_frame):
 
         # Update HP annot
         annot_hp.xy = (rpm_smooth[idx], hp_spline[idx])
-        annot_hp.set_text(f"HP: {hp_spline[idx]:.1f} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_hp.set_text(f"Power: {hp_spline[idx]:.1f} {power_unit} @ {rpm_smooth[idx]:.0f} RPM")
         annot_hp.set_visible(True)
 
         # Update Torque annot
         annot_torque.xy = (rpm_smooth[idx], torque_spline[idx])
-        annot_torque.set_text(f"Torque: {torque_spline[idx]:.1f} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_torque.set_text(f"Torque: {torque_spline[idx]:.1f} {torque_unit} @ {rpm_smooth[idx]:.0f} RPM")
         annot_torque.set_visible(True)
 
         fig.canvas.draw_idle()
@@ -516,38 +531,38 @@ def find_probable_runs(rows, rpm_col_idx=2, min_run_size=8):
     runs = []
     current_start = None
     prev_rpm = None
+
+    def save_run(start, end):
+        if end - start < min_run_size:
+            return
+        raw_run = rows[start:end]
+        clean_run = sanitize_run(raw_run, rpm_col_idx)
+        deduped_run = run_remove_duplicates(clean_run, rpm_col_idx)
+        if len(deduped_run) >= min_run_size:
+            runs.append(deduped_run)
+
     for i, row in enumerate(rows):
-        
-        # Skip rows that are empty or with missing RPM
-        if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '':
-            current_start = i
+        # Skip completely invalid rows
+        if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '' or not is_valid_rpm(row[rpm_col_idx]):
+            if current_start is not None:
+                save_run(current_start, i)
+                current_start = None
+            prev_rpm = None
             continue
 
-        try:
-            curr_rpm = float(row[rpm_col_idx])
-        except ValueError:
-            continue
+        curr_rpm = float(row[rpm_col_idx])
 
         if prev_rpm is None:
             current_start = i
-        elif curr_rpm >= prev_rpm:
-            # RPM continues to rise or stays flat -> keep going
-            pass
-        else:
-            size = i - current_start
-            if size >= min_run_size:
-                run_no_dup = run_remove_duplicates(sanitize_run(rows[current_start:i], rpm_col_idx), rpm_col_idx)
-                if len(run_no_dup) >= min_run_size:
-                    runs.append(run_no_dup)
+        elif curr_rpm < prev_rpm:
+            save_run(current_start, i)
             current_start = i
 
         prev_rpm = curr_rpm
 
-    size = i - current_start + 1
-    if size >= min_run_size:
-        run_no_dup = run_remove_duplicates(sanitize_run(rows[current_start:i+1], rpm_col_idx), rpm_col_idx)
-        if len(run_no_dup) >= min_run_size:
-            runs.append(run_no_dup)
+    # Save any remaining run
+    if current_start is not None:
+        save_run(current_start, len(rows))
 
     return runs
 
@@ -576,6 +591,15 @@ def toggle_deduce_fields():
     entry_gearbox_ratio.config(state=state)
     entry_diff_ratio.config(state=state)
     entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
+
+    # Reload the file because sometimes if deduce is not checked before loading the file
+    # no valid runs will be found
+    if log_file_path:
+        submit()
+
+def toggle_window_size_param():
+    state = "normal" if smooth_var.get() else "disabled"
+    window_size_spinbox.config(state=state)
 
 root = ttkb.Window(themename="superhero")
 root.title("VCDS Log Dyno")
@@ -637,17 +661,33 @@ entry_diff_ratio = ttkb.Entry(param_frame)
 entry_diff_ratio.insert(0, "3.238")
 entry_diff_ratio.grid(row=8, column=1, sticky="we", padx=5, pady=5)
 
+
+use_imperial = ttkb.BooleanVar(value=False)
+
+unit_checkbox = ttkb.Checkbutton(
+    param_frame,
+    text="Use imperial units",
+    variable=use_imperial,
+    command=on_select_run
+)
+unit_checkbox.grid(row=9, column=1, sticky="we", padx=10, pady=10)
+
 # Apply DIN correction checkbox
 din_var = ttkb.BooleanVar()
 din_var.set(True)
 din_checkbox = ttkb.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
-din_checkbox.grid(row=8, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+din_checkbox.grid(row=9, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply smoothing checkbox
 smooth_var = ttkb.BooleanVar()
 smooth_var.set(True)
-smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var)
+smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var, command=toggle_window_size_param)
 smooth_checkbox.grid(row=7, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+
+ttkb.Label(param_frame, text="Smoothing window size").grid(row=8, column=3, sticky="w", padx=5, pady=5)
+window_size_var = ttkb.IntVar(value=5)
+window_size_spinbox = ttkb.Spinbox(param_frame, from_=2, to=10, textvariable=window_size_var, width=5)
+window_size_spinbox.grid(row=8, column=3, sticky="e", padx=5, pady=5)
 
 # Apply point interpolation checkbox
 interpolate_var = ttkb.BooleanVar()
@@ -693,13 +733,14 @@ entry_col_air_pressure = ttkb.Entry(param_frame)
 entry_col_air_pressure.insert(0, "1013.25")
 entry_col_air_pressure.grid(row=5, column=3, sticky="we", padx=5, pady=5)
 
+
 for i in range(4):
     param_frame.columnconfigure(i, weight=1)
 
 # LOAD LOG FILE
 ttkb.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, pady=10)
 log_label = ttkb.Label(root, text="No log file loaded", bootstyle="warning", wraplength=700, justify="left")
-log_label.grid(row=2, column=0, columnspan=2, padx=10)
+log_label.grid(row=2, column=0, columnspan=3, padx=10)
 
 graph_frame = ttkb.Frame(root, relief="solid", borderwidth=2, bootstyle="default")
 graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
@@ -707,6 +748,7 @@ graph_frame.grid(row=14, column=0, columnspan=2, sticky="nsew", padx=10, pady=10
 run_selector_var = StringVar()
 run_selector = ttkb.Combobox(root, textvariable=run_selector_var, state="readonly")
 run_selector.grid(row=6, column=0, columnspan=2, sticky="we", padx=10, pady=5)
+run_selector.set('No file selected')
 
 root.rowconfigure(14, weight=1)  # pour que la ligne 14 s'étire
 root.columnconfigure(0, weight=1)
