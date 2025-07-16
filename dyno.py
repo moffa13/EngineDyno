@@ -16,12 +16,22 @@ from PIL import Image, ImageDraw, ImageFont
 import re
 import math
 import pywinstyles, sys
+from scipy.interpolate import interp1d
 
 log_file_path = None
 update_job = None
 last_changed = None  # Will be 'temp' or 'density'
 canvas_widget = None
 all_valid_runs = None
+runs_to_compare = []
+combo_runs_compare_contents = []
+submit_failed = False
+
+def moving_average(y, window_size):
+    pad = window_size // 2
+    y_padded = np.pad(y, (pad, pad), mode='edge')
+    smoothed = np.convolve(y_padded, np.ones(window_size)/window_size, mode='valid')
+    return smoothed
 
 def temp_to_density(temp_c, humidity):
     T = temp_c + 273.15
@@ -49,6 +59,15 @@ def kW_to_PS(power):
 def Nm_to_lbft(torque):
     return torque * 0.73756
 
+def convert_kW_to_imperial(hps):
+    return [kW_to_HP(hp) for hp in hps]
+
+def convert_kW_to_metric(hps):
+    return [kW_to_PS(hp) for hp in hps]
+
+def convert_torque_to_imperial(torques):
+    return [Nm_to_lbft(torque) for torque in torques]
+
 def density_to_temp(density, humidity):
     def f(temp_c):
         return temp_to_density(temp_c, humidity) - density
@@ -65,7 +84,6 @@ def schedule_update(source):
     update_job = root.after(500, apply_update)
 
 def apply_update():
-
     try:
         humidity = float(entry_humidity.get())
     except:
@@ -98,7 +116,8 @@ def apply_update():
                 entry_temp_F_var.set(round(temp_f, 1))
         except:
             pass
-
+    
+    root.after_cancel(update_job)
 
 def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=20000, max_speed=500, check_speed=True):
 
@@ -123,7 +142,91 @@ def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=
             return False
     return True
 
+def on_compare_runs():
+    if len(runs_to_compare) < 2:
+        messagebox.showerror("Error", "2 Runs of more are needed for comparison")
+        return
+    
+    toggle_params('hide')
+    print_graph_compare(runs_to_compare, graph_frame, 5)
+
+def run_to_t_rpm_speed(run):
+    col_time_i = entry_col_time_var.get()
+    col_speed_i = entry_col_speed_var.get()
+    col_rpm_i = entry_col_rpm_var.get()
+    speeds = []
+    times = []
+    rpms = []
+    for elem in run:
+        rpm = int(float(elem[col_rpm_i]))
+        rpms.append(rpm)
+        times.append(float(elem[col_time_i])) 
+        if deduce_var.get():
+            speed = get_speed_from_rpm(rpm) / 3.6
+        else:
+            conversion_factor = 2.237 if speed_log_mph_var.get() else 3.6
+            speed = float(elem[col_speed_i]) / conversion_factor
+        speeds.append(speed)
+
+    times = np.array(times)
+
+    t_uniform = np.arange(times.min(), times.max(), 0.1)
+    interp_speed = interp1d(times, speeds, kind='linear')    
+    interp_rpm = interp1d(times, rpms, kind='linear')
+
+    speed_uniform = interp_speed(t_uniform)
+    rpm_uniform = interp_rpm(t_uniform)
+
+    window_length = min(5, len(speed_uniform) // 2 * 2 + 1)
+    speed_smooth = moving_average(speed_uniform, window_length)
+
+    return t_uniform, rpm_uniform, speed_smooth
+
+def on_compare_add():
+    global runs_to_compare
+    index = run_selector.current()
+    if index >= 0:
+
+        run_calculated = analyse_run(*run_to_t_rpm_speed(all_valid_runs[index]))
+
+        if run_calculated in runs_to_compare:
+            messagebox.showerror("Error", "The same run has already been added to the compare list")
+            return
+
+        # add the hp version of everything since the parameters might change between two logs to compare
+        runs_to_compare.append(run_calculated)
+        combo_runs_compare_contents.append(run_selector['values'][index])
+        combo_runs_compare['values'] = combo_runs_compare_contents
+
+        # Select the freshly added run, to show the user something happened
+        combo_runs_compare.set(combo_runs_compare_contents[-1])
+
+def on_compare_remove():
+    global runs_to_compare
+    global combo_runs_compare_contents
+    index = combo_runs_compare.current()
+    if index >= 0:
+        del combo_runs_compare_contents[index]
+        del runs_to_compare[index]
+        combo_runs_compare['values'] = combo_runs_compare_contents
+        # Select the last run, to show the user something happened
+        if len(runs_to_compare) > 0:
+            combo_runs_compare.set(combo_runs_compare_contents[-1])
+        else:
+            on_compare_clear()
+
+def on_compare_clear():
+    global runs_to_compare
+    global combo_runs_compare_contents
+    runs_to_compare = []
+    combo_runs_compare_contents = []
+    combo_runs_compare['values'] = []
+    combo_runs_compare.set('Empty')
+
 def on_select_run(e=None):
+    if submit_failed:
+        submit()
+        return
     index = run_selector.current()
     if index >= 0:
         select_run(index)
@@ -132,14 +235,13 @@ def select_run(index):
     run = all_valid_runs[index]
 
     try:
-        hp_torque = analyse_run(run) # Will calculate rpm, hp & torque
+        hp_torque = analyse_run(*run_to_t_rpm_speed(run)) # Will calculate rpm, hp & torque
     except ValueError as e:
         messagebox.showerror("Error", "Please enter valid numeric values.")
         print(e)
 
     print_graph(hp_torque, graph_frame, int(window_size_var.get())) # Will plot        
-    param_frame.grid_remove()
-    toggle_btn.config(text="Show parameters")
+    toggle_params('hide')
 
 def find_best_run(runs, rpm_col_idx=2):
     if len(runs) == 0: return None
@@ -163,9 +265,109 @@ def sanitize_run(run, rpm_col_idx):
     ]
     return ret
 
+def detect_columns_from_rows(rows):
+    """
+    Detect timestamp, RPM, and speed columns from CSV rows.
+
+    Args:
+        rows (list[list[str]]): CSV rows as list of lists.
+
+    Returns:
+        dict with keys: found, timestamp_idx, rpm_idx, speed_idx
+    """
+
+    # Keywords for header detection
+    keywords = {
+        "timestamp": [r"\btime\b", r"stamp", r"timestamp"],
+        "rpm": [r"engine\s*speed", r"^rpm$", r"/min"],
+        "speed": [r"\bspeed\b", r"vehicle\s*speed", r"^km/h$", r"^mph$"]
+    }
+
+    exclusions = {
+        "speed": [r"engine\s*speed"]
+    }
+    
+    def is_header_row(row):
+        for i in keywords:
+            for j in keywords[i]:
+                for c in row:
+                    if re.match(j, c.lower()):
+                        return True
+        return False
+    
+    # Search function
+    def find_index(headers, patterns, exclude=None):
+        for i, col in enumerate(headers):
+            col_lower = col.strip().lower()
+            if any(re.search(p, col_lower) for p in patterns):
+                if exclude and any(re.search(e, col_lower) for e in exclude):
+                    continue
+                return i
+        return None
+
+
+    header_rows = []
+
+    # Find headers
+    for row in rows:
+        if is_header_row(row):
+            header_rows.append(row)
+
+    if len(header_rows) == 0:
+        return {"found": False}
+    
+    timestamp_idx = None
+    rpm_idx = None
+    speed_idx = None
+
+    for row in header_rows:
+        if timestamp_idx is None:
+            timestamp_idx = find_index(row, keywords["timestamp"])
+        if rpm_idx is None:
+            rpm_idx = find_index(row, keywords["rpm"])
+        if speed_idx is None:
+            speed_idx = find_index(row, keywords["speed"], exclude=exclusions['speed'])
+
+    return {
+        "found": True,
+        "timestamp_idx": timestamp_idx,
+        "rpm_idx": rpm_idx,
+        "speed_idx": speed_idx
+    }
+
+# This function retrieves the column infos using the csv headers and sets the Spinbox accordingly
+def auto_set_columns_infos(rows):
+    col_infos = detect_columns_from_rows(rows)
+
+    if col_infos['found']:
+        timestamp_idx = col_infos['timestamp_idx']
+        rpm_idx = col_infos['rpm_idx']
+        speed_idx = col_infos['speed_idx']
+
+        if timestamp_idx is not None:
+            entry_col_time_var.set(timestamp_idx)
+        if rpm_idx is not None:
+            entry_col_rpm_var.set(rpm_idx)
+        if speed_idx is not None:
+            deduce_var.set(False)
+            entry_col_speed_var.set(speed_idx)
+        else:
+            deduce_var.set(True)
+            
+            messagebox.showwarning("Submission Result",
+                                    "Vehicle speed not found in log, enabling auto deduce from RPM.\n"
+                                    "Please fill in correct tire infos and gear infos."
+                                    )
+        toggle_deduce_fields()
+    else:
+        messagebox.showwarning("Submission Result", f"Column infos not found.\n Be sure to manually set it properly")
+
 def submit():
 
     global all_valid_runs
+    global submit_failed
+
+    submit_failed = True
 
     try:
         rows = []
@@ -174,54 +376,76 @@ def submit():
                 with open(log_file_path, newline='') as csvfile:
                     reader = csv.reader(csvfile)
                     rows = list(reader)
+                    auto_set_columns_infos(rows)
+
             except Exception as e:
-                messagebox.showinfo("Submission Result", f"\n\nError reading log file: {e}")
+                messagebox.showinfo("Submission Result", f"Error reading log file: {e}")
                 return
         else:
             messagebox.showinfo("Submission Result", "No log file loaded.")
+            # If no file was selected, reload should not trigger that function again
+            submit_failed = False
             return
 
         runs = []
-        rpm_col_idx = int(entry_col_rpm.get())
-        time_col_idx = int(entry_col_time.get())
+        rpm_col_idx = entry_col_rpm_var.get()
+        time_col_idx = entry_col_time_var.get()
         
         if rows:
-            runs = find_probable_runs(rows, rpm_col_idx=rpm_col_idx) # Will get the run range
+            runs = find_probable_runs(rows, time_col_idx=time_col_idx, rpm_col_idx=rpm_col_idx) # Will get the run range
         else:
+            # If file is empty, reload should not trigger that function again
+            submit_failed = False
             messagebox.showinfo("Submission Result", "File is empty.")
             return
         
        
 
         all_valid_runs = list(filter(lambda x: validate_rows(
-            x, time_col_idx, rpm_col_idx, int(entry_col_speed.get()), check_speed=not deduce_var.get()
+            x, time_col_idx, rpm_col_idx, entry_col_speed_var.get(), check_speed=not deduce_var.get()
         ), runs))
 
+        if not all_valid_runs:
+            if deduce_var.get():
+                messagebox.showwarning("Submission Result",
+                                        "No valid run was found.\nBe sure you entered correct column info values.\n"
+                                        "Click reload to try again."
+                                        )
+            else:
+                messagebox.showwarning("Submission Result",
+                                        "No valid run was found.\nCheck that the column info values are correct.\n"
+                                        "Deduce speed from RPM is OFF, be sure to enable it if vehicle speed is not in the loaded log.\n"
+                                        "Click reload to try again.")                      
         best_index = find_best_run(all_valid_runs, rpm_col_idx)
-        
-        run_summaries = [
-            f"Run {i+1}: {len(run)} points, "
-            f"RPM {int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}, "
-            f"{(max(float(r[time_col_idx]) for r in run) - min(float(r[time_col_idx]) for r in run)):.1f} s"
-            for i, run in enumerate(all_valid_runs)
-        ]
+
+        run_summaries = []
+        for i, run in enumerate(all_valid_runs):
+            run_time = (max(float(r[time_col_idx]) for r in run) - min(float(r[time_col_idx]) for r in run))
+            rpm_range = f"{int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}"
+            text = ""
+            text += f"Run {i+1}: {len(run)} points, "
+            text += f"RPM {rpm_range}, "
+            text += f"{run_time:.1f} s, "
+            text += f"Data acquisition freq: {(len(run) / run_time):.1f} Hz"
+            run_summaries.append(text)
 
         run_selector['values'] = run_summaries
         run_selector_var.set(run_summaries[best_index] if run_summaries else "No valid runs")
 
         if best_index is not None:
             select_run(best_index)
+            submit_failed = False
+        
         
     
-    except ValueError as e:
-        messagebox.showerror("Error", "Please enter valid numeric values.")
+    except Exception as e:
+        messagebox.showerror("Error", "Unknown error")
         print(e)
 
-def analyse_run(rows):
+# will calculate power and torque based on many parameters
+# Output is in kW and Nm
+def analyse_run(times, rpms, speeds):
     car_weight = int(entry_mass.get())
-    col_time_i = int(entry_col_time.get())
-    col_rpm_i = int(entry_col_rpm.get())
-    col_speed_i = int(entry_col_speed.get())
     air_density = float(entry_air_density.get())
     air_temp = float(entry_temp_C.get())
     air_pressure_mbar = float(entry_col_air_pressure.get())
@@ -234,22 +458,16 @@ def analyse_run(rows):
         drivetrain_loss = 99.9
 
     final_hp_torque_curve = []
-    for i in range(len(rows)):
-        prev_row = None if i == 0 else rows[i-1]
-        if prev_row is None: continue
-        row = rows[i]
+    for i in range(len(times)):
+        if i == 0: continue
 
         # All the cool calculated values in order to extract two values, rpm and hp => torque
-        delta_time = float(row[col_time_i]) - float(prev_row[col_time_i])
-        prev_rpm = int(float(prev_row[col_rpm_i]))
-        rpm = int(float(row[col_rpm_i]))
-        if deduce_var.get():
-            prev_speed_ms = get_speed_from_rpm(prev_rpm) / 3.6
-            speed_ms = get_speed_from_rpm(rpm) / 3.6
-        else:
-            conversion_factor = 2.237 if speed_log_mph_var.get() else 3.6
-            prev_speed_ms = float(prev_row[col_speed_i]) / conversion_factor
-            speed_ms = float(row[col_speed_i]) / conversion_factor
+        delta_time = float(times[i]) - float(times[i-1])
+        rpm = int(float(rpms[i]))
+
+        prev_speed_ms = speeds[i-1]
+        speed_ms = speeds[i]
+
         if delta_time == 0:
             continue
         delta_speed = speed_ms - prev_speed_ms
@@ -262,11 +480,6 @@ def analyse_run(rows):
         crank_power = power_with_losses / ((100 - drivetrain_loss) / 100)
         crank_torque_Nm = (crank_power * 9549.29) / rpm
         crank_torque = crank_torque_Nm
-        if use_imperial.get(): # HP, lb.ft
-            crank_torque = Nm_to_lbft(crank_torque_Nm)
-            crank_power = kW_to_HP(crank_power)
-        else: # PS, Nm
-            crank_power = kW_to_PS(crank_power)
 
         # Apply DIN 70020 if needed
         if din_var.get():
@@ -440,7 +653,128 @@ def apply_theme_to_titlebar(root):
         root.wm_attributes("-alpha", 0.99)
         root.wm_attributes("-alpha", 1)
 
+def print_graph_compare(rpm_hp_torque_list, graph_frame, smoothing_window_size=5):
+    global canvas_widget
 
+    """
+    Plot HP and torque vs RPM on two Y axes in a Tkinter canvas frame,
+    with smoothing, peak labels, and interactive pointer.
+
+    Args:
+        rpm_hp_torque (list of tuple): List of (RPM, HP, Torque) values.
+        graph_frame (tk.Frame): The Tkinter frame to hold the canvas.
+        smoothing_window_size (int): The moving_average smoothing window size.
+    """
+
+    # Extract data per run and make a flat out rpm list to get the min and max
+    rpm_per_run = [np.array([elem[0] for elem in run]) for run in rpm_hp_torque_list]
+    hps_per_run = [np.array([elem[1] for elem in run]) for run in rpm_hp_torque_list]
+    torques_per_run = [np.array([elem[2] for elem in run]) for run in rpm_hp_torque_list]
+    rpm_ranges = [(min(run), max(run)) for run in rpm_per_run]
+    rpm_min = max(range[0] for range in rpm_ranges)
+    rpm_max = min(range[1] for range in rpm_ranges)
+    overlap = rpm_max - rpm_min
+
+
+
+    overlap_percentages = [
+        overlap / (max_rpm - min_rpm) * 100
+        for min_rpm, max_rpm in rpm_ranges
+    ]
+
+    warning_shown = False
+    for v in overlap_percentages:
+        if v <= 0:
+            messagebox.showerror(
+                "Error",
+                "At least one of the graphs does not overlap at all, comparison is not possible.\nRemove that run and try again"
+            )
+            return
+        elif v < 25:
+            messagebox.showerror(
+                "Error",
+                "The rpm overlap of a graph in the compare list is too low, comparison is not possible\nRemove that run and try again"
+            )
+            return
+        elif v < 50 and not warning_shown:
+            messagebox.showwarning(
+                "Error",
+                "The rpm overlap of a graph in the compare list is quite low, comparison is not optimal"
+            )
+            warning_shown = True
+
+    if interpolate_var.get():
+        # I want for ex 100 points per 1000 rpm
+        npoints = int((int(rpm_max) - int(rpm_min)) / 10)
+    else:
+        mean_size = int(sum(len(run) for run in rpm_per_run) / len(rpm_per_run))
+        npoints = mean_size
+
+    # The common rpm range for all the figures to compare
+    rpm_smooth = np.linspace(rpm_min, rpm_max, npoints)
+    
+    # Clear the frame
+    for widget in graph_frame.winfo_children():
+        widget.destroy()
+
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    color_hp = 'tab:red'
+    color_torque = 'tab:blue'
+
+    ax1.set_xlabel('RPM')
+    ax1.set_ylabel('Power', color=color_hp)
+    
+    ax1.tick_params(axis='y', labelcolor=color_hp)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Torque', color=color_torque)
+    
+    ax2.tick_params(axis='y', labelcolor=color_torque)
+    
+    # Disable top spines to better see the peak figures
+    ax1.spines['top'].set_visible(False)
+    ax2.spines['top'].set_visible(False)
+
+    for i in range(len(rpm_hp_torque_list)):
+
+        rpm_i = rpm_per_run[i]
+        hp_i = hps_per_run[i]
+        tq_i = torques_per_run[i]
+
+        # if imperial, convert kW to HP and Nm to lb-ft
+        if use_imperial.get():
+            hp_i = convert_kW_to_imperial(hp_i)
+            tq_i = convert_torque_to_imperial(tq_i)
+        else: # if not, just convert kW to PS
+            hp_i = convert_kW_to_metric(hp_i)
+
+
+        # Smoothing only if user allowed it
+        if smooth_var.get():
+            hp_i = moving_average(hp_i, smoothing_window_size)
+            tq_i = moving_average(tq_i, smoothing_window_size)
+
+
+        hp_spline = make_interp_spline(rpm_i, hp_i, k=3)(rpm_smooth)
+        torque_spline = make_interp_spline(rpm_i, tq_i, k=3)(rpm_smooth)
+
+        ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='Power')
+        ax2.plot(rpm_smooth, torque_spline, color=color_torque, label='Torque')
+
+    fig.tight_layout()
+
+    if canvas_widget:
+        canvas_widget.get_tk_widget().destroy()
+
+    canvas_widget = FigureCanvasTkAgg(fig, master=graph_frame)
+    canvas_widget.draw()
+    canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+
+    plt.close(fig)
+    print_button.grid()
 
 def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
 
@@ -453,6 +787,7 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     Args:
         rpm_hp_torque (list of tuple): List of (RPM, HP, Torque) values.
         graph_frame (tk.Frame): The Tkinter frame to hold the canvas.
+        smoothing_window_size (int): The moving_average smoothing window size.
     """
     # Clear the frame
     for widget in graph_frame.winfo_children():
@@ -463,6 +798,13 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     hp = np.array([point[1] for point in rpm_hp_torque])
     torque = np.array([point[2] for point in rpm_hp_torque])
 
+    # if imperial, convert kW to HP and Nm to lb-ft
+    if use_imperial.get():
+        hp = convert_kW_to_imperial(hp)
+        torque = convert_torque_to_imperial(torque)
+    else: # if not, just convert kW to PS
+        hp = convert_kW_to_metric(hp)
+
 
     # I want for ex 100 points per 1000 rpm
     npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
@@ -472,11 +814,12 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
             return y
         return np.convolve(y, np.ones(window_size)/window_size, mode='same')
     
+    # Smoothing only if user allowed it
     if smooth_var.get():
         hp = moving_average(hp, smoothing_window_size)
         torque = moving_average(torque, smoothing_window_size)
 
-    # Smoothing
+    # Iterpolate if more than 4 data points and the interpolation is allowed
     if len(rpm) >= 4 and interpolate_var.get():
         rpm_smooth = np.linspace(rpm.min(), rpm.max(), npoints)
         hp_spline = make_interp_spline(rpm, hp, k=3)(rpm_smooth)
@@ -485,6 +828,7 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
         rpm_smooth = rpm
         hp_spline = hp
         torque_spline = torque
+
 
     
 
@@ -512,16 +856,18 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     torque_unit = 'lb-ft' if use_imperial.get() else 'Nm'
 
     annot_peak_hp = ax1.annotate(f'Peak power: {hp_spline[hp_peak_idx]:.1f} {power_unit} @ {rpm_smooth[hp_peak_idx]:.0f} RPM', 
+                 textcoords="offset points",
                  xy=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx]),
-                 xytext=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx] + 10),
+                 xytext=(5, 10),
                  arrowprops=dict(facecolor=color_hp, arrowstyle="->"),
                  color=color_hp)
 
     
 
     annot_peak_torque = ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f} {torque_unit} @ {rpm_smooth[torque_peak_idx]:.0f} RPM',
+                 textcoords="offset points",
                  xy=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx]),
-                 xytext=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx] + 10),
+                 xytext=(5, 10),
                  arrowprops=dict(facecolor=color_torque, arrowstyle="->"),
                  color=color_torque)
     
@@ -540,6 +886,13 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
                                 arrowprops=dict(arrowstyle="->"), color='black')
     annot_torque.set_visible(False)
 
+    
+    # Draw dynamic annotations on top of everything
+    if annot_hp not in fig.artists:
+        fig.artists.append(annot_hp)
+    if annot_torque not in fig.artists:
+        fig.artists.append(annot_torque)
+    
 
     def on_mouse_move(event):
         if event.inaxes not in [ax1, ax2]:
@@ -570,19 +923,47 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
         annot_torque.set_text(f"Torque: {torque_spline[idx]:.1f} {torque_unit} @ {rpm_smooth[idx]:.0f} RPM")
         annot_torque.set_visible(True)
 
+        annot_torque.set_position((20, 20))
+        
+        renderer = fig.canvas.get_renderer()
+        bbox1 = annot_hp.get_window_extent(renderer)
+        bbox2 = annot_torque.get_window_extent(renderer)
+
+        if bbox1.overlaps(bbox2):
+            annot_torque.set_position((-200, 20))
+
+        
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect("motion_notify_event", on_mouse_move)
 
-    fig.tight_layout()
+    def check_peak_overlap():
+        annot_peak_torque.set_position((5, 10))
+        renderer = canvas_widget.get_renderer()
+        bbox1 = annot_peak_hp.get_window_extent(renderer)
+        bbox2 = annot_peak_torque.get_window_extent(renderer)
+        # if peaks overlap, only one offset is enough to fix the problem
+        if bbox1.overlaps(bbox2):
+            annot_peak_torque.set_position((-200, 10))
+            fig.canvas.draw_idle()
 
     if canvas_widget:
         canvas_widget.get_tk_widget().destroy()
 
     canvas_widget = FigureCanvasTkAgg(fig, master=graph_frame)
+
+    fig.tight_layout()
     canvas_widget.draw()
     canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+   
+    
+    # This is needed to check overlap, the figure needs to be fully rendered in tkinter
+    canvas_widget.get_tk_widget().after_idle(check_peak_overlap)
 
+    # Re-check for peak annot collisions when resizing
+    graph_frame.bind('<Configure>', lambda e: check_peak_overlap())
+
+    
     plt.close(fig)
     print_button.grid()
 
@@ -601,7 +982,7 @@ def run_remove_duplicates(rows, rpm_col_idx=2):
             seen_rpms.add(rpm)
     return unique_data
 
-def find_probable_runs(rows, rpm_col_idx=2, min_run_size=8):
+def find_probable_runs(rows, time_col_idx=1, rpm_col_idx=2, min_run_size=8, min_run_time=2, min_rpm_range=500, min_rpm_allowed=2500):
     runs = []
     current_start = None
     prev_rpm = None
@@ -612,7 +993,18 @@ def find_probable_runs(rows, rpm_col_idx=2, min_run_size=8):
         raw_run = rows[start:end]
         clean_run = sanitize_run(raw_run, rpm_col_idx)
         deduped_run = run_remove_duplicates(clean_run, rpm_col_idx)
-        if len(deduped_run) >= min_run_size:
+
+        min_rpm = min([float(i[rpm_col_idx]) for i in deduped_run])
+        max_rpm = max([float(i[rpm_col_idx]) for i in deduped_run])
+
+        total_time = float(deduped_run[-1][time_col_idx]) - float(deduped_run[0][time_col_idx])
+        
+        run_long_enough_time = total_time >= min_run_time
+        run_enough_datapoints = len(deduped_run) >= min_run_size
+        run_enough_rpm_range = max_rpm - min_rpm >= min_rpm_range
+        run_rpm_range_high_enough = max_rpm >= min_rpm_allowed
+
+        if run_enough_datapoints and run_enough_rpm_range and run_rpm_range_high_enough and run_long_enough_time:
             runs.append(deduped_run)
 
     for i, row in enumerate(rows):
@@ -651,13 +1043,15 @@ def load_log_file():
         log_file_path = None
         log_label.config(text="No log file loaded")
 
-def toggle_params():
-    if param_frame.winfo_ismapped():
+def toggle_params(action=None):
+    if action == "hide" or param_frame.winfo_ismapped():
         param_frame.grid_remove()
-        toggle_btn.config(text="Show parameters")
+        actions_frame.grid_remove()
+        toggle_btn.config(text="Show all")
     else:
         param_frame.grid()
-        toggle_btn.config(text="Hide parameters")
+        actions_frame.grid()
+        toggle_btn.config(text="Hide all")
 
 def toggle_deduce_fields():
     state = "normal" if deduce_var.get() else "disabled"
@@ -666,11 +1060,6 @@ def toggle_deduce_fields():
     entry_diff_ratio.config(state=state)
     entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
     speed_mph_checkbox.config(state="disabled" if deduce_var.get() else "normal")
-
-    # Reload the file because sometimes if deduce is not checked before loading the file
-    # no valid runs will be found
-    if log_file_path:
-        submit()
 
 def toggle_window_size_param():
     state = "normal" if smooth_var.get() else "disabled"
@@ -684,6 +1073,9 @@ root.geometry("1000x850")
 param_frame = ttkb.LabelFrame(root, text="Parameters")
 param_frame.pack(padx=10, pady=10)
 param_frame.grid(row=0, column=0, columnspan=4, sticky="we", padx=10, pady=10)
+
+for i in range(4):
+    param_frame.columnconfigure(i, weight=1)
 
 # FIRST COLUMN
 label_mass = ttkb.Label(param_frame, text="Car mass (kg)")
@@ -728,7 +1120,7 @@ entry_humidity.grid(row=3, column=1, sticky="we", padx=5, pady=5)
 label_scx = ttkb.Label(param_frame, text="SCx")
 label_scx.grid(row=4, column=0, sticky="e", padx=5, pady=5)
 entry_scx = ttkb.Spinbox(param_frame, from_=0.2, to=1.2, increment=0.01)
-entry_scx.insert(0, "0.65")
+entry_scx.insert(0, "0.653")
 entry_scx.grid(row=4, column=1, sticky="we", padx=5, pady=5)
 
 label_gearbox_loss = ttkb.Label(param_frame, text="Gearbox loss %")
@@ -764,8 +1156,7 @@ use_imperial = tkinter.BooleanVar(value=False)
 unit_checkbox = ttkb.Checkbutton(
     param_frame,
     text="Use imperial units",
-    variable=use_imperial,
-    command=on_select_run
+    variable=use_imperial
 )
 unit_checkbox.grid(row=9, column=1, sticky="we", padx=10, pady=10)
 
@@ -774,8 +1165,7 @@ speed_log_mph_var = tkinter.BooleanVar(value=False)
 speed_mph_checkbox = ttkb.Checkbutton(
     param_frame,
     text="Speed in logs is in mph",
-    variable=speed_log_mph_var,
-    command=on_select_run
+    variable=speed_log_mph_var
 )
 speed_mph_checkbox.grid(row=9, column=2, sticky="we", padx=10, pady=10)
 
@@ -822,22 +1212,25 @@ entry_gravity = ttkb.Spinbox(param_frame, from_=9, to=10, increment=0.01)
 entry_gravity.insert(0, "9.81")
 entry_gravity.grid(row=1, column=3, sticky="we", padx=5, pady=5)
 
+entry_col_time_var = tkinter.IntVar()
+entry_col_time_var.set(1)
 label_col_time = ttkb.Label(param_frame, text="Time stamp column")
 label_col_time.grid(row=2, column=2, sticky="e", padx=5, pady=5)
-entry_col_time = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1)
-entry_col_time.insert(0, "1")
+entry_col_time = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_time_var)
 entry_col_time.grid(row=2, column=3, sticky="we", padx=5, pady=5)
 
+entry_col_speed_var = tkinter.IntVar()
+entry_col_speed_var.set(3)
 label_col_speed = ttkb.Label(param_frame, text="Vehicle speed column")
 label_col_speed.grid(row=3, column=2, sticky="e", padx=5, pady=5)
-entry_col_speed = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1)
-entry_col_speed.insert(0, "3")
+entry_col_speed = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_speed_var)
 entry_col_speed.grid(row=3, column=3, sticky="we", padx=5, pady=5)
 
+entry_col_rpm_var = tkinter.IntVar()
+entry_col_rpm_var.set(2)
 label_col_rpm = ttkb.Label(param_frame, text="RPM column")
 label_col_rpm.grid(row=4, column=2, sticky="e", padx=5, pady=5)
-entry_col_rpm = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1)
-entry_col_rpm.insert(0, "2")
+entry_col_rpm = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_rpm_var)
 entry_col_rpm.grid(row=4, column=3, sticky="we", padx=5, pady=5)
 
 
@@ -848,20 +1241,24 @@ entry_col_air_pressure.insert(0, "1013.25")
 entry_col_air_pressure.grid(row=5, column=3, sticky="we", padx=5, pady=5)
 
 
+
+
+actions_frame = ttkb.LabelFrame(root, text="Actions")
+actions_frame.grid(row=1, column=0, columnspan=4, sticky="we", padx=10, pady=10)
 for i in range(4):
-    param_frame.columnconfigure(i, weight=1)
+    actions_frame.columnconfigure(i, weight=1)
 
 # LOAD LOG FILE
-ttkb.Button(root, text="Load log file", command=load_log_file).grid(row=1, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
-log_label = ttkb.Label(root, text="No log file loaded", wraplength=700, justify="left")
-log_label.grid(row=2, column=0, columnspan=3)
+ttkb.Button(actions_frame, text="Load log file", command=load_log_file).grid(row=0, column=0, columnspan=4, padx=20, pady=10, sticky="ew")
+log_label = ttkb.Label(actions_frame, text="No log file loaded", wraplength=700, justify="left")
+log_label.grid(row=1, column=0, columnspan=4)
 
 graph_frame = ttkb.Frame(root, relief="solid", borderwidth=2)
 graph_frame.grid(row=7, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
 
 run_selector_var = tkinter.StringVar()
 run_selector = ttkb.Combobox(root, textvariable=run_selector_var, state="readonly")
-run_selector.grid(row=6, column=0, columnspan=2, sticky="we", padx=10, pady=5)
+run_selector.grid(row=3, column=0, columnspan=2, sticky="we", padx=10, pady=5)
 run_selector.set('No file selected')
 
 root.rowconfigure(7, weight=1)
@@ -871,18 +1268,26 @@ root.columnconfigure(1, weight=1)
 
 
 # RELOAD + TOGGLE BUTTON
-ttkb.Button(root, text="Reload", command=on_select_run).grid(row=5, column=0, padx=20, pady=10, sticky="ew")
-toggle_btn = ttkb.Button(root, text="Hide parameters", command=toggle_params)
-toggle_btn.grid(row=5, column=1, padx=20, pady=20, sticky="ew")
+ttkb.Button(actions_frame, text="Reload", command=on_select_run).grid(row=3, column=0, padx=20, pady=10, sticky="ew")
+toggle_btn = ttkb.Button(root, text="Hide all", command=toggle_params)
+toggle_btn.grid(row=2, column=0, columnspan=4, padx=20, pady=20, sticky="ew")
+
+ttkb.Button(actions_frame, text="Add to compare", command=on_compare_add).grid(row=4, column=0, padx=20, pady=10, sticky="ew")
+ttkb.Button(actions_frame, text="Compare runs", command=on_compare_runs).grid(row=4, column=1, padx=20, pady=10, sticky="ew")
+ttkb.Button(actions_frame, text="Clear compare list", command=on_compare_clear).grid(row=4, column=2, padx=20, pady=10, sticky="ew")
+ttkb.Button(actions_frame, text="Remove selected compare run", command=on_compare_remove).grid(row=4, column=3, padx=20, pady=10, sticky="ew")
+
+
+ttkb.Label(actions_frame, text="Loaded runs to compare", wraplength=700, justify="left").grid(row=5, column=0)
+combo_runs_compare = ttkb.Combobox(actions_frame, state="readonly")
+
+combo_runs_compare.set('Empty')
+
+combo_runs_compare.grid(row=5, column=1, columnspan=3, sticky="ew", padx=20, pady=10)
 
 print_button = ttkb.Button(root, text="Print Graph", command=print_graph_to_printer)
 print_button.grid(row=15, column=1, padx=50, pady=20, sticky="ew")
 print_button.grid_remove()  # Start hidden
-
-def on_graph_resize(event):
-    if canvas_widget:
-        canvas_widget.get_tk_widget().config(width=event.width, height=event.height)
-        canvas_widget.draw()
 
 entry_tire.config(state="disabled")
 entry_gearbox_ratio.config(state="disabled")
@@ -943,13 +1348,11 @@ Hovertip(
 )
 Hovertip(din_checkbox, "Check this to apply the DIN correction to the power figures.")
 
-
-graph_frame.bind('<Configure>', on_graph_resize)
 entry_temp_C_var.trace_add("write", lambda *args: schedule_update('temp_C'))
 entry_temp_F_var.trace_add("write", lambda *args: schedule_update('temp_F'))
 entry_density_var.trace_add("write", lambda *args: schedule_update('density'))
-entry_humidity.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
-entry_col_air_pressure.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp'))
+entry_humidity_var.trace_add("write", lambda *args: schedule_update(last_changed if last_changed else 'temp_C'))
+entry_col_air_pressure.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp_C'))
 run_selector.bind("<<ComboboxSelected>>", on_select_run)
 
 plt.style.use('dark_background')
