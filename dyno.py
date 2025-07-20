@@ -328,7 +328,7 @@ def run_postfilter(data, sg_window_rpm=300, sg_poly=3):
 def run_prefilter(run):
 
     ok_time_sr = 10 # sr will be minimum 1 / that
-    avg_window_time_ms = 1000
+    avg_window_time_ms = 100
 
     rpms = run['rpms']
     times = run['times']
@@ -599,8 +599,6 @@ def auto_set_columns_infos(rows):
         messagebox.showwarning("Submission Result", f"Column infos not found.\n Be sure to manually set it properly")
 
 def submit(auto_load_col_fields=False):
-
-    print('submit!')
 
     global all_valid_runs
     global re_submit_needed
@@ -968,12 +966,8 @@ def print_graph_compare(rpm_hp_torque_list, graph_frame, smoothing_window_size=5
             )
             warning_shown = True
 
-    if interpolate_var.get():
-        # I want for ex 100 points per 1000 rpm
-        npoints = int((int(rpm_max) - int(rpm_min)) / 10)
-    else:
-        mean_size = int(sum(len(run) for run in rpm_per_run) / len(rpm_per_run))
-        npoints = mean_size
+    
+    npoints = int(sum(len(run) for run in rpm_per_run) / len(rpm_per_run))
 
     # The common rpm range for all the figures to compare
     rpm_smooth = np.linspace(rpm_min, rpm_max, npoints)
@@ -1071,10 +1065,6 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     else: # if not, just convert kW to PS
         hp = convert_kW_to_metric(hp)
 
-
-    # I want for ex 100 points per 1000 rpm
-    npoints = int((int(rpm.max()) - int(rpm.min())) / 10)
-
     def moving_average(y, window_size):
         if len(y) < window_size:
             return y
@@ -1085,19 +1075,6 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
         hp = moving_average(hp, smoothing_window_size)
         torque = moving_average(torque, smoothing_window_size)
 
-    # Iterpolate if more than 4 data points and the interpolation is allowed
-    if len(rpm) >= 4 and interpolate_var.get():
-        rpm_smooth = np.linspace(rpm.min(), rpm.max(), npoints)
-        hp_spline = make_interp_spline(rpm, hp, k=3)(rpm_smooth)
-        torque_spline = make_interp_spline(rpm, torque, k=3)(rpm_smooth)
-    else:
-        rpm_smooth = rpm
-        hp_spline = hp
-        torque_spline = torque
-
-
-    
-
     # Plot
     fig, ax1 = plt.subplots(figsize=(8, 5))
 
@@ -1106,33 +1083,33 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
 
     ax1.set_xlabel('RPM')
     ax1.set_ylabel('Power', color=color_hp)
-    ax1.plot(rpm_smooth, hp_spline, color=color_hp, label='Power')
+    ax1.plot(rpm, hp, color=color_hp, label='Power')
     ax1.tick_params(axis='y', labelcolor=color_hp)
 
     ax2 = ax1.twinx()
     ax2.set_ylabel('Torque', color=color_torque)
-    ax2.plot(rpm_smooth, torque_spline, color=color_torque, label='Torque')
+    ax2.plot(rpm, torque, color=color_torque, label='Torque')
     ax2.tick_params(axis='y', labelcolor=color_torque)
 
     # Peak labels
-    hp_peak_idx = np.argmax(hp_spline)
-    torque_peak_idx = np.argmax(torque_spline)
+    hp_peak_idx = np.argmax(hp)
+    torque_peak_idx = np.argmax(torque)
 
     power_unit = 'HP' if use_imperial.get() else 'PS'
     torque_unit = 'lb-ft' if use_imperial.get() else 'Nm'
 
-    annot_peak_hp = ax1.annotate(f'Peak power: {hp_spline[hp_peak_idx]:.1f} {power_unit} @ {rpm_smooth[hp_peak_idx]:.0f} RPM', 
+    annot_peak_hp = ax1.annotate(f'Peak power: {hp[hp_peak_idx]:.1f} {power_unit} @ {rpm[hp_peak_idx]:.0f} RPM', 
                  textcoords="offset points",
-                 xy=(rpm_smooth[hp_peak_idx], hp_spline[hp_peak_idx]),
+                 xy=(rpm[hp_peak_idx], hp[hp_peak_idx]),
                  xytext=(5, 10),
                  arrowprops=dict(facecolor=color_hp, arrowstyle="->"),
                  color=color_hp)
 
     
 
-    annot_peak_torque = ax2.annotate(f'Peak Torque: {torque_spline[torque_peak_idx]:.1f} {torque_unit} @ {rpm_smooth[torque_peak_idx]:.0f} RPM',
+    annot_peak_torque = ax2.annotate(f'Peak Torque: {torque[torque_peak_idx]:.1f} {torque_unit} @ {rpm[torque_peak_idx]:.0f} RPM',
                  textcoords="offset points",
-                 xy=(rpm_smooth[torque_peak_idx], torque_spline[torque_peak_idx]),
+                 xy=(rpm[torque_peak_idx], torque[torque_peak_idx]),
                  xytext=(5, 10),
                  arrowprops=dict(facecolor=color_torque, arrowstyle="->"),
                  color=color_torque)
@@ -1177,16 +1154,16 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
         annot_peak_torque.set_visible(False)
         
         # Find closest index
-        idx = np.abs(rpm_smooth - x).argmin()
+        idx = np.abs(rpm - x).argmin()
 
         # Update HP annot
-        annot_hp.xy = (rpm_smooth[idx], hp_spline[idx])
-        annot_hp.set_text(f"Power: {hp_spline[idx]:.1f} {power_unit} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_hp.xy = (rpm[idx], hp[idx])
+        annot_hp.set_text(f"Power: {hp[idx]:.1f} {power_unit} @ {rpm[idx]:.0f} RPM")
         annot_hp.set_visible(True)
 
         # Update Torque annot
-        annot_torque.xy = (rpm_smooth[idx], torque_spline[idx])
-        annot_torque.set_text(f"Torque: {torque_spline[idx]:.1f} {torque_unit} @ {rpm_smooth[idx]:.0f} RPM")
+        annot_torque.xy = (rpm[idx], torque[idx])
+        annot_torque.set_text(f"Torque: {torque[idx]:.1f} {torque_unit} @ {rpm[idx]:.0f} RPM")
         annot_torque.set_visible(True)
 
         annot_torque.set_position((20, 20))
@@ -1389,17 +1366,19 @@ entry_tire.insert(0, "205/45 R16")
 entry_tire.grid(row=6, column=1, sticky="we", padx=5, pady=5)
 
 # --- Gearbox ratio field ---
+entry_gearbox_ratio_var = tkinter.DoubleVar()
 label_gearbox_ratio = ttkb.Label(param_frame, text="Gearbox ratio")
 label_gearbox_ratio.grid(row=7, column=0, sticky="e", padx=5, pady=5)
-entry_gearbox_ratio = ttkb.Spinbox(param_frame, from_=0.1, to=5, increment=0.001)
-entry_gearbox_ratio.insert(0, "1.324")
+entry_gearbox_ratio = ttkb.Spinbox(param_frame, from_=0.1, to=5, increment=0.001, textvariable=entry_gearbox_ratio_var)
+entry_gearbox_ratio_var.set(1.324)
 entry_gearbox_ratio.grid(row=7, column=1, sticky="we", padx=5, pady=5)
 
 # --- Differential ratio field ---
+entry_diff_ratio_var = tkinter.DoubleVar()
 label_diff_ratio = ttkb.Label(param_frame, text="Differential ratio")
 label_diff_ratio.grid(row=8, column=0, sticky="e", padx=5, pady=5)
-entry_diff_ratio = ttkb.Spinbox(param_frame, from_=0.1, to=5, increment=0.001)
-entry_diff_ratio.insert(0, "3.238")
+entry_diff_ratio = ttkb.Spinbox(param_frame, from_=0.1, to=5, increment=0.001, textvariable=entry_diff_ratio_var)
+entry_diff_ratio_var.set(3.238)
 entry_diff_ratio.grid(row=8, column=1, sticky="we", padx=5, pady=5)
 
 
@@ -1420,31 +1399,31 @@ speed_mph_checkbox = ttkb.Checkbutton(
     variable=speed_log_mph_var,
     command=critical_value_changed
 )
-speed_mph_checkbox.grid(row=9, column=2, sticky="we", padx=10, pady=10)
+speed_mph_checkbox.grid(row=6, column=3, sticky="we", padx=10, pady=10)
 
 # Apply DIN correction checkbox
 din_var = tkinter.BooleanVar()
 din_var.set(True)
 din_checkbox = ttkb.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
-din_checkbox.grid(row=9, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+din_checkbox.grid(row=7, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 # Apply smoothing checkbox
 smooth_var = tkinter.BooleanVar()
 smooth_var.set(True)
 smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var, command=toggle_window_size_param)
-smooth_checkbox.grid(row=7, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+smooth_checkbox.grid(row=8, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
 label_window_size = ttkb.Label(param_frame, text="Smoothing window size")
-label_window_size.grid(row=8, column=3, sticky="w", padx=5, pady=5)
+label_window_size.grid(row=9, column=3, sticky="w", padx=5, pady=5)
 window_size_var = tkinter.IntVar(value=5)
 window_size_spinbox = ttkb.Spinbox(param_frame, from_=2, to=10, textvariable=window_size_var, width=5)
-window_size_spinbox.grid(row=8, column=3, sticky="e", padx=5, pady=5)
+window_size_spinbox.grid(row=9, column=3, sticky="e", padx=5, pady=5)
 
 # Apply point interpolation checkbox
-interpolate_var = tkinter.BooleanVar()
+'''interpolate_var = tkinter.BooleanVar()
 interpolate_var.set(True)
 interpolate_checkbox = ttkb.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
-interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)'''
 
 deduce_speed_from_rpm_var = tkinter.BooleanVar(value=False)
 deduce_speed_from_rpm_checkbox = ttkb.Checkbutton(
@@ -1589,12 +1568,12 @@ Hovertip(label_col_time, "The index where to find the time stamp in the logs (st
 Hovertip(label_col_speed, "The index where to find the vehicle speed in the logs (starts at 0)")
 Hovertip(label_col_rpm, "The index where to find the vehicle RPM in the logs (starts at 0)")
 Hovertip(label_col_air_pressure, "The outside air pressure")
-Hovertip(
+'''Hovertip(
     interpolate_checkbox,
     "Check this if you want to create more points than the log has.\n"
     "This helps eliminate sharp edges or jagged transitions, "
     "making the graph easier to read and more representative of real-world behavior"
-)
+)'''
 Hovertip(
     smooth_checkbox,
     "Check this if you want to smooth the graph.\n"
@@ -1611,6 +1590,8 @@ entry_temp_C_var.trace_add("write", lambda *args: schedule_update('temp_C'))
 entry_temp_F_var.trace_add("write", lambda *args: schedule_update('temp_F'))
 entry_density_var.trace_add("write", lambda *args: schedule_update('density'))
 entry_humidity_var.trace_add("write", lambda *args: schedule_update(last_changed if last_changed else 'temp_C'))
+entry_gearbox_ratio_var.trace_add("write", lambda *args: critical_value_changed())
+entry_diff_ratio_var.trace_add("write", lambda *args: critical_value_changed())
 entry_col_air_pressure.bind("<KeyRelease>", lambda e: schedule_update(last_changed if last_changed else 'temp_C'))
 run_selector.bind("<<ComboboxSelected>>", on_select_run)
 
