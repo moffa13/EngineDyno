@@ -17,6 +17,7 @@ import re
 import math
 import pywinstyles, sys
 from scipy.interpolate import interp1d
+from scipy.signal import savgol_filter
 
 log_file_path = None
 update_job = None
@@ -25,13 +26,20 @@ canvas_widget = None
 all_valid_runs = None
 runs_to_compare = []
 combo_runs_compare_contents = []
-submit_failed = False
+re_submit_needed = False
 
 def moving_average(y, window_size):
-    pad = window_size // 2
-    y_padded = np.pad(y, (pad, pad), mode='edge')
-    smoothed = np.convolve(y_padded, np.ones(window_size)/window_size, mode='valid')
-    return smoothed
+    y = np.asarray(y)
+    N = len(y)
+    result = np.empty(N, dtype=float)
+    half = window_size // 2
+    
+    for i in range(N):
+        start = max(0, i - half)
+        end = min(N, i + half + 1)
+        result[i] = y[start:end].mean()
+    
+    return result
 
 def temp_to_density(temp_c, humidity):
     T = temp_c + 273.15
@@ -83,6 +91,9 @@ def schedule_update(source):
         root.after_cancel(update_job)
     update_job = root.after(500, apply_update)
 
+
+# This function will make the density / humidity / temp_C / temp_F consistent
+# By updating based on the modified one (last_changed)
 def apply_update():
     try:
         humidity = float(entry_humidity.get())
@@ -119,28 +130,38 @@ def apply_update():
     
     root.after_cancel(update_job)
 
-def validate_rows(rows, time_col_idx=1, rpm_col_idx=2, speed_col_idx=3, max_rpm=20000, max_speed=500, check_speed=True):
+# This function returns whether or not all the values in the range are in range
+def validate_rows(run, min_run_size=8, min_run_time=2, min_rpm_range=500, min_rpm_allowed=2500, max_rpm=20000, max_speed=500, check_speed=True):
 
-    for row in rows:
-        try:
-            time = float(row[time_col_idx])
-            rpm = float(row[rpm_col_idx])
-            if check_speed:
-                speed = float(row[speed_col_idx])
-        except (ValueError, IndexError):
-            return False
+    min_rpm = min(run['rpms'])
+    max_rpm = max(run['rpms'])
+    total_time = run['times'][-1] - run['times'][0]
 
-        if time < 0:
-            return False
-        if rpm < 0:
-            return False
-        if check_speed and speed < 0:
-            return False
-        if rpm > max_rpm:
-            return False
-        if check_speed and speed > max_speed:
-            return False
+    if max_rpm - min_rpm < min_rpm_range: # too small rpm range
+        return False
+
+        
+    if max_rpm < min_rpm_allowed: # max rpm in the run is too low
+        return False
+    
+    if len(run['times']) < min_run_size: # not enough data points in the run
+        return False
+    
+    if total_time < min_run_time: # run not long enough in time
+        return False
+
+
+    if any(time < 0 for time in run['times']):
+        return False
+    
+    if check_speed and any(speed < 0 or speed > max_speed for speed in run['speeds']):
+        return False
+    
+    if any(rpm < 0 or rpm > max_rpm for rpm in run['rpms']):
+        return False
+    
     return True
+
 
 def on_compare_runs():
     if len(runs_to_compare) < 2:
@@ -150,44 +171,237 @@ def on_compare_runs():
     toggle_params('hide')
     print_graph_compare(runs_to_compare, graph_frame, 5)
 
-def run_to_t_rpm_speed(run):
+# converts the raw run in csv mode in a dict with times, rpms and speeds keys
+# speed is converted to m/s
+def runs_to_dict(runs, important_cols):
     col_time_i = entry_col_time_var.get()
     col_speed_i = entry_col_speed_var.get()
     col_rpm_i = entry_col_rpm_var.get()
-    speeds = []
-    times = []
-    rpms = []
-    for elem in run:
-        rpm = int(float(elem[col_rpm_i]))
-        rpms.append(rpm)
-        times.append(float(elem[col_time_i])) 
-        if deduce_var.get():
-            speed = get_speed_from_rpm(rpm) / 3.6
-        else:
-            conversion_factor = 2.237 if speed_log_mph_var.get() else 3.6
-            speed = float(elem[col_speed_i]) / conversion_factor
-        speeds.append(speed)
 
-    times = np.array(times)
+    runs_dict = []
 
-    t_uniform = np.arange(times.min(), times.max(), 0.1)
+    for run in runs:
+
+        run = sanitize_run(run, important_cols)
+
+        if len(run) == 0:
+            continue
+
+        speeds = []
+        times = []
+        rpms = []
+        for elem in run:
+            
+            
+            times.append(float(elem[col_time_i])) 
+
+            # rpm is in the logs, retrieve it
+            if not deduce_rpm_from_speed_var.get():
+                rpm = int(float(elem[col_rpm_i]))
+
+            if deduce_speed_from_rpm_var.get():
+                speed = get_speed_from_rpm(rpm) / 3.6
+            else:
+                conversion_factor = 2.237 if speed_log_mph_var.get() else 3.6
+                speed = float(elem[col_speed_i]) / conversion_factor
+
+            
+            if deduce_rpm_from_speed_var.get():
+                rpm = get_rpm_from_speed(speed)
+                
+
+            rpms.append(rpm)
+            speeds.append(speed)
+
+        sampling_rate = 1 / np.mean(np.diff(times))
+
+        runs_dict.append({
+            'sampling_rate': sampling_rate,
+            'times': np.array(times),
+            'rpms': np.array(rpms),
+            'speeds': np.array(speeds)
+        })
+    return runs_dict
+
+'''def run_prefilter(run, target_rate=10, sg_window_sec=1.0, sg_poly=3):
+    """
+    Preprocess run data by interpolating and smoothing speed & RPM.
+    
+    Parameters:
+        run (dict): {'times': [...], 'speeds': [...], 'rpms': [...]}
+        target_rate (float): Resampling rate in Hz (e.g., 10 for 100ms steps)
+        sg_window_sec (float): Savitzky-Golay window in seconds
+        sg_poly (int): Polynomial order for Savitzky-Golay filter
+        
+    Returns:
+        dict: {'times': ..., 'speeds': ..., 'rpms': ...} (filtered & resampled)
+    """
+    
+    # Extract arrays
+    times = np.array(run['times'], dtype=float)
+    speeds = np.array(run['speeds'], dtype=float)
+    rpms = np.array(run['rpms'], dtype=float)
+
+    # --- 1. Validate data ---
+    if len(times) < 5:
+        raise ValueError("Not enough data points for filtering.")
+    
+    # --- 2. Create uniform time base ---
+    t_start, t_end = times[0], times[-1]
+    dt = 1.0 / target_rate
+    t_uniform = np.arange(t_start, t_end, dt)
+    
+    # --- 3. Linear interpolate speeds & rpms ---
+    speeds_interp = np.interp(t_uniform, times, speeds)
+    rpms_interp = np.interp(t_uniform, times, rpms)
+    
+    # --- 4. Apply Savitzky-Golay smoothing ---
+    # Convert sg_window_sec to samples (must be odd and >= polyorder+2)
+    sg_window = int(sg_window_sec * target_rate)
+    if sg_window % 2 == 0:  # must be odd
+        sg_window += 1
+    sg_window = max(sg_window, sg_poly + 2 | 1)  # ensure valid size
+    
+    speeds_filt = savgol_filter(speeds_interp, sg_window, sg_poly)
+    rpms_filt = savgol_filter(rpms_interp, sg_window, sg_poly)
+    
+    return t_uniform, rpms_filt, speeds_filt'''
+
+'''def run_prefilter(run):
+    times = np.array(run['times'])
+    speeds = np.array(run['speeds'])  # m/s
+    rpms = np.array(run['rpms'])
+        
+    # 2. Assess log quality
+    avg_dt = np.mean(np.diff(times))
+    std_dt = np.std(np.diff(times))
+    jitter_ratio = std_dt / avg_dt
+    
+    # Decide resampling step
+    if avg_dt <= 0.02:      # ~50 Hz
+        target_dt = 0.05    # 20 Hz
+    elif avg_dt <= 0.1:     # 10 Hz
+        target_dt = 0.1     # 10 Hz
+    else:                   # Low rate (GPS-like)
+        target_dt = avg_dt  # Don't fake detail
+    
+    new_times = np.arange(times[0], times[-1], target_dt)
+    
+    # 3. Interpolate
+    interp_speed = interp1d(times, speeds, kind='linear', fill_value="extrapolate")
+    interp_rpm = interp1d(times, rpms, kind='linear', fill_value="extrapolate")
+    
+    speeds_u = interp_speed(new_times)
+    rpms_u = interp_rpm(new_times)
+    
+    # 4. Smoothing based on jitter
+    if jitter_ratio > 0.1 or target_dt >= 0.1:
+        window = max(5, int(0.5 / target_dt))  # ~0.5s window
+        if window % 2 == 0: window += 1        # make it odd
+        speeds_u = savgol_filter(speeds_u, window, polyorder=3)
+        rpms_u = savgol_filter(rpms_u, window, polyorder=3)
+    
+    return new_times, rpms_u, speeds_u'''
+
+def run_postfilter(data, sg_window_rpm=300, sg_poly=3):
+    data = sorted(data, key=lambda x: x[0])
+    rpms = np.array([x[0] for x in data], dtype=float)
+    hp = np.array([x[1] for x in data], dtype=float)
+    tq = np.array([x[2] for x in data], dtype=float)
+
+    rpm_span = rpms[-1] - rpms[0]
+    n_points = len(rpms)
+    avg_step = rpm_span / max(n_points - 1, 1)
+
+    sg_window_pts = int(sg_window_rpm / avg_step)
+    if sg_window_pts % 2 == 0:
+        sg_window_pts += 1
+    sg_window_pts = max(sg_window_pts, sg_poly + 2 | 1)
+    sg_window_pts = min(sg_window_pts, n_points if n_points % 2 == 1 else n_points - 1)
+
+    hp_smoothed = savgol_filter(hp, sg_window_pts, sg_poly)
+    tq_smoothed = savgol_filter(tq, sg_window_pts, sg_poly)
+
+    return list(zip(rpms, hp_smoothed, tq_smoothed))
+
+# This is the data pre filter
+def run_prefilter(run):
+
+    ok_time_sr = 10 # sr will be minimum 1 / that
+    avg_window_time_ms = 1000
+
+    rpms = run['rpms']
+    times = run['times']
+    speeds = run['speeds']
+
+
+    sampling_rate = run['sampling_rate']
+
+    
+    time_step = 1 / max(sampling_rate, ok_time_sr)
+
+    t_uniform = np.arange(times.min(), times.max(), time_step)
     interp_speed = interp1d(times, speeds, kind='linear')    
     interp_rpm = interp1d(times, rpms, kind='linear')
 
     speed_uniform = interp_speed(t_uniform)
     rpm_uniform = interp_rpm(t_uniform)
 
-    window_length = min(5, len(speed_uniform) // 2 * 2 + 1)
-    speed_smooth = moving_average(speed_uniform, window_length)
+    smoothed_speeds = savgol_filter(speed_uniform, 5, 3)
+    smoothed_rpms = savgol_filter(rpm_uniform, 5, 3)
 
-    return t_uniform, rpm_uniform, speed_smooth
+    window_size = max(3, int((avg_window_time_ms / 1000) / time_step))
+    if window_size % 2 == 0:  # Ensure window size is odd
+        window_size += 1
+    
+    avg_times = []
+    avg_speeds = []
+    avg_rpms = []
+
+    for i in range(len(t_uniform)):
+        # Compute safe slice indices with padding at edges
+        start_prev = max(0, i - window_size)
+        end_prev = i
+        start_next = i
+        end_next = min(len(t_uniform), i + window_size)
+
+        # Previous and next slices
+        prev_speeds = smoothed_speeds[start_prev:end_prev]
+        prev_times = t_uniform[start_prev:end_prev]
+
+        next_speeds = smoothed_speeds[start_next:end_next]
+        next_times = t_uniform[start_next:end_next]
+
+        # Compute averages (handle empty slices at edges)
+        avg_prev_speed = np.mean(prev_speeds) if len(prev_speeds) > 0 else smoothed_speeds[i]
+        avg_prev_time = np.mean(prev_times) if len(prev_times) > 0 else t_uniform[i]
+
+        avg_next_speed = np.mean(next_speeds) if len(next_speeds) > 0 else smoothed_speeds[i]
+        avg_next_time = np.mean(next_times) if len(next_times) > 0 else t_uniform[i]
+
+        avg_rpm = int(np.mean(smoothed_rpms[start_prev:end_next]))
+
+        # Centered values
+        avg_times.append((avg_prev_time + avg_next_time) / 2)
+        avg_speeds.append((avg_prev_speed + avg_next_speed) / 2)
+        avg_rpms.append(avg_rpm)
+        
+
+    # if by any chance there is a duplicated rpm value
+    # add a small residual value to not make the plotting crash with
+    # expect x to not have duplicates
+    _, idx = np.unique(avg_rpms, return_index=True)
+    if len(idx) != len(avg_rpms): 
+        avg_rpms += np.arange(len(avg_rpms)) * 1e-6
+
+    return avg_times, avg_rpms, avg_speeds
 
 def on_compare_add():
     global runs_to_compare
     index = run_selector.current()
     if index >= 0:
 
-        run_calculated = analyse_run(*run_to_t_rpm_speed(all_valid_runs[index]))
+        run_calculated = run_postfilter(analyse_run(*run_prefilter(all_valid_runs[index])))
 
         if run_calculated in runs_to_compare:
             messagebox.showerror("Error", "The same run has already been added to the compare list")
@@ -223,19 +437,24 @@ def on_compare_clear():
     combo_runs_compare['values'] = []
     combo_runs_compare.set('Empty')
 
+# Called by UI when a run is selected in the combo box or reloaded
+# If the file was not accepted it will be submitted again (e.g if the columns parameters were wrong)
 def on_select_run(e=None):
-    if submit_failed:
+    if re_submit_needed:
         submit()
         return
     index = run_selector.current()
     if index >= 0:
         select_run(index)
 
+# Selects a run based on the index, calculates power & torque figures
+# And plot in the graph
+# All useless data in the UI is then hidden
 def select_run(index):
     run = all_valid_runs[index]
 
     try:
-        hp_torque = analyse_run(*run_to_t_rpm_speed(run)) # Will calculate rpm, hp & torque
+        hp_torque = run_postfilter(analyse_run(*run_prefilter(run))) # Will calculate rpm, hp & torque
     except ValueError as e:
         messagebox.showerror("Error", "Please enter valid numeric values.")
         print(e)
@@ -243,27 +462,34 @@ def select_run(index):
     print_graph(hp_torque, graph_frame, int(window_size_var.get())) # Will plot        
     toggle_params('hide')
 
-def find_best_run(runs, rpm_col_idx=2):
+# Returns the best supposed run
+# Used when loading a file and automatically select the most meaningful run
+# RPM range is the most important, second is the length of the run
+def find_best_run(runs):
     if len(runs) == 0: return None
     def score(run):
-        rpms = [float(r[rpm_col_idx]) for r in run]
-        return (max(rpms) - min(rpms)) * (len(run) ** 0.5)
+        return (max(run['rpms']) - min(run['rpms'])) * (len(run) ** 0.5)
     
     return max(range(len(runs)), key=lambda i: score(runs[i]))
 
-def is_valid_rpm(value):
+def is_valid_numeric(value):
     try:
-        rpm = float(value)
-        return rpm > 0  # Or >= 0 depending on what you want
+        value = float(value)
+        return value > 0  # Or >= 0 depending on what you want
     except (ValueError, TypeError):
         return False
 
-def sanitize_run(run, rpm_col_idx):
-    ret = [
-        row for row in run
-        if len(row) > rpm_col_idx and is_valid_rpm(row[rpm_col_idx])
-    ]
-    return ret
+def sanitize_run(run, important_cols):
+    run_sanitized = []
+    for row in run:
+        rowOk = True
+        for imp in important_cols:
+            if len(row) <= imp or not is_valid_numeric(row[imp]):
+                rowOk = False
+                break
+        if rowOk:
+            run_sanitized.append(row)
+    return run_sanitized
 
 def detect_columns_from_rows(rows):
     """
@@ -348,12 +574,22 @@ def auto_set_columns_infos(rows):
             entry_col_time_var.set(timestamp_idx)
         if rpm_idx is not None:
             entry_col_rpm_var.set(rpm_idx)
+            deduce_rpm_from_speed_var.set(False)
+            deduce_speed_from_rpm_var.set(True)
+        else:
+            deduce_rpm_from_speed_var.set(True)
+            deduce_speed_from_rpm_var.set(False)
+            messagebox.showwarning("Submission Result",
+                        "Vehicle RPM not found in log, enabling auto deduce from speed.\n"
+                        "Please fill in correct tire infos and gear infos."
+            )
+
         if speed_idx is not None:
-            deduce_var.set(False)
+            deduce_speed_from_rpm_var.set(False)
             entry_col_speed_var.set(speed_idx)
         else:
-            deduce_var.set(True)
-            
+            deduce_speed_from_rpm_var.set(True)
+            deduce_rpm_from_speed_var.set(False)
             messagebox.showwarning("Submission Result",
                                     "Vehicle speed not found in log, enabling auto deduce from RPM.\n"
                                     "Please fill in correct tire infos and gear infos."
@@ -362,12 +598,14 @@ def auto_set_columns_infos(rows):
     else:
         messagebox.showwarning("Submission Result", f"Column infos not found.\n Be sure to manually set it properly")
 
-def submit():
+def submit(auto_load_col_fields=False):
+
+    print('submit!')
 
     global all_valid_runs
-    global submit_failed
+    global re_submit_needed
 
-    submit_failed = True
+    re_submit_needed = True
 
     try:
         rows = []
@@ -376,7 +614,8 @@ def submit():
                 with open(log_file_path, newline='') as csvfile:
                     reader = csv.reader(csvfile)
                     rows = list(reader)
-                    auto_set_columns_infos(rows)
+                    if auto_load_col_fields:
+                        auto_set_columns_infos(rows)
 
             except Exception as e:
                 messagebox.showinfo("Submission Result", f"Error reading log file: {e}")
@@ -384,29 +623,38 @@ def submit():
         else:
             messagebox.showinfo("Submission Result", "No log file loaded.")
             # If no file was selected, reload should not trigger that function again
-            submit_failed = False
+            re_submit_needed = False
             return
 
         runs = []
-        rpm_col_idx = entry_col_rpm_var.get()
-        time_col_idx = entry_col_time_var.get()
+        deduce_disabled = not deduce_speed_from_rpm_var.get() and not deduce_rpm_from_speed_var.get()
+        deduce_speed = deduce_speed_from_rpm_var.get()
+        filter_col_idx = entry_col_rpm_var.get() if deduce_speed or deduce_disabled else entry_col_speed_var.get()
+
+        important_cols = [entry_col_time_var.get()]
+        if deduce_disabled:
+            important_cols.append(entry_col_rpm_var.get())
+            important_cols.append(entry_col_speed_var.get())
+        elif deduce_speed_from_rpm_var.get():
+            important_cols.append(entry_col_rpm_var.get())
+        elif deduce_rpm_from_speed_var.get():
+            important_cols.append(entry_col_speed_var.get())
         
         if rows:
-            runs = find_probable_runs(rows, time_col_idx=time_col_idx, rpm_col_idx=rpm_col_idx) # Will get the run range
+            runs = find_probable_runs(rows, filter_col_idx=filter_col_idx) # Will get the run range
+            runs = runs_to_dict(runs, important_cols)
         else:
             # If file is empty, reload should not trigger that function again
-            submit_failed = False
+            re_submit_needed = False
             messagebox.showinfo("Submission Result", "File is empty.")
             return
-        
-       
 
         all_valid_runs = list(filter(lambda x: validate_rows(
-            x, time_col_idx, rpm_col_idx, entry_col_speed_var.get(), check_speed=not deduce_var.get()
+            x, check_speed=not deduce_speed_from_rpm_var.get()
         ), runs))
 
         if not all_valid_runs:
-            if deduce_var.get():
+            if deduce_speed_from_rpm_var.get():
                 messagebox.showwarning("Submission Result",
                                         "No valid run was found.\nBe sure you entered correct column info values.\n"
                                         "Click reload to try again."
@@ -416,17 +664,18 @@ def submit():
                                         "No valid run was found.\nCheck that the column info values are correct.\n"
                                         "Deduce speed from RPM is OFF, be sure to enable it if vehicle speed is not in the loaded log.\n"
                                         "Click reload to try again.")                      
-        best_index = find_best_run(all_valid_runs, rpm_col_idx)
+        best_index = find_best_run(all_valid_runs)
 
         run_summaries = []
         for i, run in enumerate(all_valid_runs):
-            run_time = (max(float(r[time_col_idx]) for r in run) - min(float(r[time_col_idx]) for r in run))
-            rpm_range = f"{int(min(float(r[rpm_col_idx]) for r in run))}-{int(max(float(r[rpm_col_idx]) for r in run))}"
+            run_time = (max(run['times']) - min(run['times']))
+            rpm_range = f"{int(min(run['rpms']))}-{int(max(run['rpms']))}"
+            run_len = len(run['times'])
             text = ""
-            text += f"Run {i+1}: {len(run)} points, "
+            text += f"Run {i+1}: {run_len} points, "
             text += f"RPM {rpm_range}, "
             text += f"{run_time:.1f} s, "
-            text += f"Data acquisition freq: {(len(run) / run_time):.1f} Hz"
+            text += f"Data acquisition freq: {(run_len / run_time):.1f} Hz"
             run_summaries.append(text)
 
         run_selector['values'] = run_summaries
@@ -434,7 +683,7 @@ def submit():
 
         if best_index is not None:
             select_run(best_index)
-            submit_failed = False
+            re_submit_needed = False
         
         
     
@@ -463,7 +712,7 @@ def analyse_run(times, rpms, speeds):
 
         # All the cool calculated values in order to extract two values, rpm and hp => torque
         delta_time = float(times[i]) - float(times[i-1])
-        rpm = int(float(rpms[i]))
+        rpm = float(rpms[i])
 
         prev_speed_ms = speeds[i-1]
         speed_ms = speeds[i]
@@ -600,6 +849,22 @@ def wheel_perimeter_cm(width_mm, aspect_ratio, rim_diameter_inch):
     total_dia_mm = rim_dia_mm + 2 * sidewall
     perimeter_mm = math.pi * total_dia_mm
     return perimeter_mm / 10  # mm to cm
+
+def get_rpm_from_speed(speed):
+    width, aspect, diameter = parse_tire_size(entry_tire.get())
+    gear_ratio = float(entry_gearbox_ratio.get())
+    diff_ratio = float(entry_diff_ratio.get())
+
+    perim = wheel_perimeter_cm(width, aspect, diameter)
+
+    final_ratio = gear_ratio * diff_ratio
+
+    if final_ratio == 0:
+        final_ratio = 0.01
+
+    rpm = speed * final_ratio * 60 / perim * 100
+
+    return rpm
 
 def get_speed_from_rpm(rpm):
 
@@ -798,6 +1063,7 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     hp = np.array([point[1] for point in rpm_hp_torque])
     torque = np.array([point[2] for point in rpm_hp_torque])
 
+
     # if imperial, convert kW to HP and Nm to lb-ft
     if use_imperial.get():
         hp = convert_kW_to_imperial(hp)
@@ -967,64 +1233,33 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     plt.close(fig)
     print_button.grid()
 
-def run_remove_duplicates(rows, rpm_col_idx=2):
-
-    if not rows: return None
-
-    # To remove duplicates and keep the first occurrence of each RPM
-    unique_data = []
-    seen_rpms = set()
-
-    for row in rows:
-        rpm = row[rpm_col_idx]
-        if rpm not in seen_rpms:
-            unique_data.append(row)
-            seen_rpms.add(rpm)
-    return unique_data
-
-def find_probable_runs(rows, time_col_idx=1, rpm_col_idx=2, min_run_size=8, min_run_time=2, min_rpm_range=500, min_rpm_allowed=2500):
+def find_probable_runs(rows, filter_col_idx=2):
     runs = []
     current_start = None
     prev_rpm = None
 
     def save_run(start, end):
-        if end - start < min_run_size:
-            return
         raw_run = rows[start:end]
-        clean_run = sanitize_run(raw_run, rpm_col_idx)
-        deduped_run = run_remove_duplicates(clean_run, rpm_col_idx)
-
-        min_rpm = min([float(i[rpm_col_idx]) for i in deduped_run])
-        max_rpm = max([float(i[rpm_col_idx]) for i in deduped_run])
-
-        total_time = float(deduped_run[-1][time_col_idx]) - float(deduped_run[0][time_col_idx])
-        
-        run_long_enough_time = total_time >= min_run_time
-        run_enough_datapoints = len(deduped_run) >= min_run_size
-        run_enough_rpm_range = max_rpm - min_rpm >= min_rpm_range
-        run_rpm_range_high_enough = max_rpm >= min_rpm_allowed
-
-        if run_enough_datapoints and run_enough_rpm_range and run_rpm_range_high_enough and run_long_enough_time:
-            runs.append(deduped_run)
+        runs.append(raw_run)
 
     for i, row in enumerate(rows):
         # Skip completely invalid rows
-        if not row or len(row) <= rpm_col_idx or row[rpm_col_idx] == '' or not is_valid_rpm(row[rpm_col_idx]):
+        if not row or len(row) <= filter_col_idx or row[filter_col_idx] == '' or not is_valid_numeric(row[filter_col_idx]):
             if current_start is not None:
                 save_run(current_start, i)
                 current_start = None
             prev_rpm = None
             continue
 
-        curr_rpm = float(row[rpm_col_idx])
+        curr_rpm_or_speed = float(row[filter_col_idx])
 
         if prev_rpm is None:
             current_start = i
-        elif curr_rpm < prev_rpm:
+        elif curr_rpm_or_speed < prev_rpm:
             save_run(current_start, i)
             current_start = i
 
-        prev_rpm = curr_rpm
+        prev_rpm = curr_rpm_or_speed
 
     # Save any remaining run
     if current_start is not None:
@@ -1038,10 +1273,7 @@ def load_log_file():
     if file_path:
         log_file_path = file_path
         log_label.config(text=f"Loaded: {file_path}")
-        submit()
-    else:
-        log_file_path = None
-        log_label.config(text="No log file loaded")
+        submit(auto_load_col_fields=True)
 
 def toggle_params(action=None):
     if action == "hide" or param_frame.winfo_ismapped():
@@ -1053,13 +1285,33 @@ def toggle_params(action=None):
         actions_frame.grid()
         toggle_btn.config(text="Hide all")
 
-def toggle_deduce_fields():
-    state = "normal" if deduce_var.get() else "disabled"
+def toggle_deduce_fields(element=None):
+    global re_submit_needed
+    
+    # This makes sure that runs are reloaded
+    re_submit_needed = True
+
+
+    if element == deduce_rpm_from_speed_var and deduce_rpm_from_speed_var.get():
+        deduce_speed_from_rpm_var.set(False)
+    elif element == deduce_speed_from_rpm_var and deduce_speed_from_rpm_var.get():
+        deduce_rpm_from_speed_var.set(False)
+
+    one_is_checked = deduce_speed_from_rpm_var.get() or deduce_rpm_from_speed_var.get()
+
+    state = "normal" if one_is_checked else "disabled"
     entry_tire.config(state=state)
     entry_gearbox_ratio.config(state=state)
     entry_diff_ratio.config(state=state)
-    entry_col_speed.config(state="disabled" if deduce_var.get() else "normal")
-    speed_mph_checkbox.config(state="disabled" if deduce_var.get() else "normal")
+    entry_col_speed.config(state="disabled" if deduce_speed_from_rpm_var.get() else "normal")
+    entry_col_rpm.config(state="disabled" if deduce_rpm_from_speed_var.get() else "normal")
+    speed_mph_checkbox.config(state="disabled" if deduce_speed_from_rpm_var.get() else "normal")
+
+def critical_value_changed():
+    global re_submit_needed
+
+    # This makes sure that runs are reloaded
+    re_submit_needed = True
 
 def toggle_window_size_param():
     state = "normal" if smooth_var.get() else "disabled"
@@ -1165,7 +1417,8 @@ speed_log_mph_var = tkinter.BooleanVar(value=False)
 speed_mph_checkbox = ttkb.Checkbutton(
     param_frame,
     text="Speed in logs is in mph",
-    variable=speed_log_mph_var
+    variable=speed_log_mph_var,
+    command=critical_value_changed
 )
 speed_mph_checkbox.grid(row=9, column=2, sticky="we", padx=10, pady=10)
 
@@ -1193,11 +1446,17 @@ interpolate_var.set(True)
 interpolate_checkbox = ttkb.Checkbutton(param_frame, text="Apply point interp.", variable=interpolate_var)
 interpolate_checkbox.grid(row=6, column=3, columnspan=2, sticky="w", padx=5, pady=5)
 
-deduce_var = tkinter.BooleanVar(value=False)
-deduce_checkbox = ttkb.Checkbutton(
-    param_frame, text="Deduce speed from RPM", variable=deduce_var, command=toggle_deduce_fields
+deduce_speed_from_rpm_var = tkinter.BooleanVar(value=False)
+deduce_speed_from_rpm_checkbox = ttkb.Checkbutton(
+    param_frame, text="Deduce speed from RPM", variable=deduce_speed_from_rpm_var, command=lambda: toggle_deduce_fields(deduce_speed_from_rpm_var)
 )
-deduce_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+deduce_speed_from_rpm_checkbox.grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=5)
+
+deduce_rpm_from_speed_var = tkinter.BooleanVar(value=False)
+deduce_rpm_from_speed_checkbox = ttkb.Checkbutton(
+    param_frame, text="Deduce RPM from speed", variable=deduce_rpm_from_speed_var, command=lambda: toggle_deduce_fields(deduce_rpm_from_speed_var)
+)
+deduce_rpm_from_speed_checkbox.grid(row=7, column=2, columnspan=2, sticky="w", padx=5, pady=5)
 
 # SECOND COLUMN
 label_crr = ttkb.Label(param_frame, text="Crr")
@@ -1216,21 +1475,21 @@ entry_col_time_var = tkinter.IntVar()
 entry_col_time_var.set(1)
 label_col_time = ttkb.Label(param_frame, text="Time stamp column")
 label_col_time.grid(row=2, column=2, sticky="e", padx=5, pady=5)
-entry_col_time = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_time_var)
+entry_col_time = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_time_var, command=critical_value_changed)
 entry_col_time.grid(row=2, column=3, sticky="we", padx=5, pady=5)
 
 entry_col_speed_var = tkinter.IntVar()
 entry_col_speed_var.set(3)
 label_col_speed = ttkb.Label(param_frame, text="Vehicle speed column")
 label_col_speed.grid(row=3, column=2, sticky="e", padx=5, pady=5)
-entry_col_speed = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_speed_var)
+entry_col_speed = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_speed_var, command=critical_value_changed)
 entry_col_speed.grid(row=3, column=3, sticky="we", padx=5, pady=5)
 
 entry_col_rpm_var = tkinter.IntVar()
 entry_col_rpm_var.set(2)
 label_col_rpm = ttkb.Label(param_frame, text="RPM column")
 label_col_rpm.grid(row=4, column=2, sticky="e", padx=5, pady=5)
-entry_col_rpm = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_rpm_var)
+entry_col_rpm = ttkb.Spinbox(param_frame, from_=0, to=10, increment=1, textvariable=entry_col_rpm_var, command=critical_value_changed)
 entry_col_rpm.grid(row=4, column=3, sticky="we", padx=5, pady=5)
 
 
@@ -1313,7 +1572,7 @@ Hovertip(
 )
 Hovertip(unit_checkbox, "Check this if you want the dyno results in imperial units (HP and lb-ft)")
 Hovertip(
-    deduce_checkbox,
+    deduce_speed_from_rpm_checkbox,
     "Check this if the vehicle speed is not in the log values.\n"
     "It will then be calculted based on tire infos and final gear ratio."
 )

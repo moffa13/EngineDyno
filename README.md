@@ -4,7 +4,7 @@
 
 This project aims to compute dyno data based mainly on timestamp, vehicle speed, and RPM.
 
-All values depend on:
+The calculated power/torque will depend on:
 - vehicle mass
 - air density / pressure
 - outdoor temperature / humidity
@@ -12,17 +12,21 @@ All values depend on:
 - drivetrain loss
 - rolling resistance
 
-The program is designed to retrieve data based on **VCDS logs**, but can be adjusted to read other CSV files.
+The program is designed to retrieve data based on **CSV logs**, such as VCDS, Dragy, ...
 
 At the end, you will see a dyno graph including **torque** and **power**.
+
+There is also a feature to compare runs between each other
 
 ---
 
 ## Requirements
 
-For this to work, you need to modify your ECU map to create a custom log channel that includes both **RPM** and **vehicle speed**.
+For this to work, the logs should contain at least a time stamp and vehicule RPM or speed.
 
-📖 A tutorial can be found here:  
+On EDC15 ecu, you need to modify your ECU map to create a custom log channel that includes both **RPM** and **vehicle speed** if you don't have gear ratios.
+
+📖 A tutorial for EDC15 can be found here:  
 [https://www.ecuconnections.com/forum/viewtopic.php?f=6&t=23324](https://www.ecuconnections.com/forum/viewtopic.php?f=6&t=23324)
 
 Log data on a **flat road**, record:
@@ -36,7 +40,7 @@ Run the program and carefully set all parameters to accurate values.
 ---
 
 
-## VCDS Column Mapping
+## Infos for VCDS Column Mapping
 
 The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
 
@@ -49,8 +53,18 @@ The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
 ## Auto deduce speed from RPM
 
 If you do not have the speed data recorded into your log, you can check the "Deduce speed from RPM" option
-to automatically retrieve the vehicle speed based on tire info along with gear and differential ratios.
+to automatically retrieve the vehicle speed based on RPM, tire info along with gear and differential ratios.
 
+## Auto deduce RPM from speed
+
+If you do not have the rpm data recorded into your log which happens in logs that are generally recorded with devices not connected to the engine such as Dragy, you can check the "Deduce RPM from speed" option
+to automatically retrieve the RPM based on speed, tire info along with gear and differential ratios.
+
+## Decrypt logs from Dragy
+
+Long click on the dragy run (Found in Me -> History -> 0-100, 1/4 mile, ...) will create an encrypted **json** file which can be decrypted using the following tool:
+
+- [https://dragy-decryptor.d3vl.com/](https://dragy-decryptor.d3vl.com/)
 ---
 
 ## Definitions
