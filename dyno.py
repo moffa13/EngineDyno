@@ -506,7 +506,7 @@ def detect_columns_from_rows(rows):
     keywords = {
         "timestamp": [r"\btime\b", r"stamp", r"timestamp"],
         "rpm": [r"engine\s*speed", r"^rpm$", r"/min"],
-        "speed": [r"\bspeed\b", r"vehicle\s*speed", r"^km/h$", r"^mph$"]
+        "speed": [r"\bspeed\b", r"vehicle\s*speed", r"km/h", r"mph", r"kmph", r"kmh"]
     }
 
     exclusions = {
@@ -517,7 +517,7 @@ def detect_columns_from_rows(rows):
         for i in keywords:
             for j in keywords[i]:
                 for c in row:
-                    if re.match(j, c.lower()):
+                    if re.match(j, c.lower().strip()):
                         return True
         return False
     
@@ -545,6 +545,7 @@ def detect_columns_from_rows(rows):
     timestamp_idx = None
     rpm_idx = None
     speed_idx = None
+    speed_unit = None
 
     for row in header_rows:
         if timestamp_idx is None:
@@ -553,12 +554,24 @@ def detect_columns_from_rows(rows):
             rpm_idx = find_index(row, keywords["rpm"])
         if speed_idx is None:
             speed_idx = find_index(row, keywords["speed"], exclude=exclusions['speed'])
+    
+    # We found speed, we look in all headers at the same index to check the unit
+    if speed_idx is not None:
+        for row in header_rows:
+            value = row[speed_idx].lower()
+            if any(re.search(reg, value) for reg in [r"km/h", r"\bkph\b", r"kmph", r"\bkmh\b"]):
+                speed_unit = 'kph'
+                break
+            elif re.search(r"\bmph\b", value):
+                speed_unit = 'mph'
+                break
 
     return {
         "found": True,
         "timestamp_idx": timestamp_idx,
         "rpm_idx": rpm_idx,
-        "speed_idx": speed_idx
+        "speed_idx": speed_idx,
+        "speed_unit": speed_unit
     }
 
 # This function retrieves the column infos using the csv headers and sets the Spinbox accordingly
@@ -569,9 +582,15 @@ def auto_set_columns_infos(rows):
         timestamp_idx = col_infos['timestamp_idx']
         rpm_idx = col_infos['rpm_idx']
         speed_idx = col_infos['speed_idx']
+        speed_unit = col_infos['speed_unit']
 
         if timestamp_idx is not None:
             entry_col_time_var.set(timestamp_idx)
+        else:
+            messagebox.showwarning("Submission Result",
+                        "No timestamp was found in the log.\n"
+                        "Ensure that the log contains timestamps and set the column parameter accordingly."
+            )
         if rpm_idx is not None:
             entry_col_rpm_var.set(rpm_idx)
             deduce_rpm_from_speed_var.set(False)
@@ -587,6 +606,16 @@ def auto_set_columns_infos(rows):
         if speed_idx is not None:
             deduce_speed_from_rpm_var.set(False)
             entry_col_speed_var.set(speed_idx)
+            if speed_unit == 'kph':
+                speed_log_mph_var.set(False)
+            elif speed_unit == 'mph':
+                speed_log_mph_var.set(True)
+            else:
+                speed_log_mph_var.set(False)
+                messagebox.showwarning("Submission Result",
+                        "Vehicle speed was found in log, But couldn't determine the unit (mph or km/h).\n"
+                        "Please check the 'speed in logs in mph' checkbox if that's the case."
+                        )
         else:
             deduce_speed_from_rpm_var.set(True)
             deduce_rpm_from_speed_var.set(False)
@@ -596,7 +625,7 @@ def auto_set_columns_infos(rows):
                                     )
         toggle_deduce_fields()
     else:
-        messagebox.showwarning("Submission Result", f"Column infos not found.\n Be sure to manually set it properly")
+        messagebox.showwarning("Submission Result", f"Column infos not found.\nBe sure to manually set them properly")
 
 def submit(auto_load_col_fields=False):
 
