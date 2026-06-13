@@ -19,7 +19,9 @@ import pywinstyles, sys
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
+loss_run = None
 log_file_path = None
+loss_file_path = None
 update_job = None
 last_changed = None  # Will be 'temp' or 'density'
 canvas_widget = None
@@ -131,15 +133,19 @@ def apply_update():
     root.after_cancel(update_job)
 
 # This function returns whether or not all the values in the range are in range
-def validate_rows(run, min_run_size=8, min_run_time=2, min_rpm_range=500, min_rpm_allowed=2500, max_rpm=20000, max_speed=500, check_speed=True):
+def validate_rows(run, min_run_size=6, min_run_time=1, min_rpm_range=500, min_rpm_allowed=1500, max_rpm=20000, max_speed=500, check_speed=True, check_rpms=True):
 
-    min_rpm = min(run['rpms'])
-    max_rpm = max(run['rpms'])
+    if check_rpms:
+        min_rpm = min(run['rpms'])
+        max_rpm = max(run['rpms'])
+        
+        if any(rpm < 0 or rpm > max_rpm for rpm in run['rpms']):
+            return False
+
+        if max_rpm - min_rpm < min_rpm_range: # too small rpm range
+            return False
+
     total_time = run['times'][-1] - run['times'][0]
-
-    if max_rpm - min_rpm < min_rpm_range: # too small rpm range
-        return False
-
         
     if max_rpm < min_rpm_allowed: # max rpm in the run is too low
         return False
@@ -155,9 +161,6 @@ def validate_rows(run, min_run_size=8, min_run_time=2, min_rpm_range=500, min_rp
         return False
     
     if check_speed and any(speed < 0 or speed > max_speed for speed in run['speeds']):
-        return False
-    
-    if any(rpm < 0 or rpm > max_rpm for rpm in run['rpms']):
         return False
     
     return True
@@ -221,6 +224,7 @@ def runs_to_dict(runs, important_cols):
             'rpms': np.array(rpms),
             'speeds': np.array(speeds)
         })
+        
     return runs_dict
 
 '''def run_prefilter(run, target_rate=10, sg_window_sec=1.0, sg_poly=3):
@@ -334,13 +338,11 @@ def run_prefilter(run):
     times = run['times']
     speeds = run['speeds']
 
-
     sampling_rate = run['sampling_rate']
 
-    
     time_step = 1 / max(sampling_rate, ok_time_sr)
 
-    t_uniform = np.arange(times.min(), times.max(), time_step)
+    t_uniform = np.linspace(times.min(), times.max(), int((times.max() - times.min()) / time_step))
     interp_speed = interp1d(times, speeds, kind='linear')    
     interp_rpm = interp1d(times, rpms, kind='linear')
 
@@ -455,12 +457,13 @@ def select_run(index):
 
     try:
         hp_torque = run_postfilter(analyse_run(*run_prefilter(run))) # Will calculate rpm, hp & torque
+        print_graph(hp_torque, graph_frame, int(window_size_var.get())) # Will plot        
+        toggle_params('hide')
     except ValueError as e:
         messagebox.showerror("Error", "Please enter valid numeric values.")
         print(e)
 
-    print_graph(hp_torque, graph_frame, int(window_size_var.get())) # Will plot        
-    toggle_params('hide')
+    
 
 # Returns the best supposed run
 # Used when loading a file and automatically select the most meaningful run
@@ -470,6 +473,18 @@ def find_best_run(runs):
     def score(run):
         return (max(run['rpms']) - min(run['rpms'])) * (len(run) ** 0.5)
     
+    return max(range(len(runs)), key=lambda i: score(runs[i]))
+
+def find_best_loss_run(runs):
+    if len(runs) == 0:
+        return None
+
+    def score(run):
+        speed_range = max(run['speeds']) - min(run['speeds'])
+        max_speed = max(run['speeds'])
+
+        return speed_range * (len(run) ** 0.5) * (max_speed ** 0.3)
+
     return max(range(len(runs)), key=lambda i: score(runs[i]))
 
 def is_valid_numeric(value):
@@ -627,6 +642,48 @@ def auto_set_columns_infos(rows):
     else:
         messagebox.showwarning("Submission Result", f"Column infos not found.\nBe sure to manually set them properly")
 
+def handle_loss_file():
+    global loss_run
+    rows = []
+    if loss_file_path:
+        try:
+            with open(loss_file_path, newline='') as csvfile:
+                reader = csv.reader(csvfile)
+                rows = list(reader)
+                auto_set_columns_infos(rows)
+
+        except Exception as e:
+            messagebox.showinfo("Submission Result", f"Error reading loss file: {e}")
+            return
+    else:
+        messagebox.showinfo("Submission Result", "No loss file loaded.")
+        return
+
+    time_col = 1
+    speed_col = 3
+    important_cols = [time_col, speed_col]
+    runs_dicts = []
+    runs = find_probable_runs(rows, filter_col_idx=3, direction="down") # Will get the run range
+    for run in runs:
+        run = sanitize_run(run, important_cols)
+        r = {
+            "speeds": [float(i[speed_col]) / 3.6 for i in run],    
+            "times": [float(i[time_col]) for i in run]
+        }
+        runs_dicts.append(r)
+
+    all_valid_runs = list(filter(lambda x: validate_rows(
+                x, check_speed=True, check_rpms=False
+            ), runs_dicts))
+    
+    best_index = find_best_loss_run(all_valid_runs)
+    best_run = all_valid_runs[best_index]
+    power = analyse_run(best_run['times'], None, best_run['speeds'], is_loss_run=True)
+    loss_run = dict()
+    loss_run['speeds'] = [x[0] / 3.6 for x in power]
+    loss_run['losses'] = [x[1] for x in power]
+    messagebox.showinfo("Submission Result", "Successfully loaded loss file!")
+    
 def submit(auto_load_col_fields=False):
 
     global all_valid_runs
@@ -720,7 +777,8 @@ def submit(auto_load_col_fields=False):
 
 # will calculate power and torque based on many parameters
 # Output is in kW and Nm
-def analyse_run(times, rpms, speeds):
+def analyse_run(times, rpms, speeds, is_loss_run=False):
+    global loss_run
     car_weight = int(entry_mass.get())
     air_density = float(entry_air_density.get())
     air_temp = float(entry_temp_C.get())
@@ -739,7 +797,10 @@ def analyse_run(times, rpms, speeds):
 
         # All the cool calculated values in order to extract two values, rpm and hp => torque
         delta_time = float(times[i]) - float(times[i-1])
-        rpm = float(rpms[i])
+        rpm = None
+        if rpms:
+            rpm = float(rpms[i])
+
 
         prev_speed_ms = speeds[i-1]
         speed_ms = speeds[i]
@@ -750,20 +811,39 @@ def analyse_run(times, rpms, speeds):
         acceleration = delta_speed / delta_time
         force = acceleration * car_weight
         power_kw = force * speed_ms * 0.001
+
+        power = 0
         air_loss_kw = 0.5 * air_density * scx * speed_ms ** 3 * 0.001
         rolling_loss_kw = car_weight * rolling_coeff * gravity * speed_ms * 0.001
-        power_with_losses  = power_kw + air_loss_kw + rolling_loss_kw
-        crank_power = power_with_losses / ((100 - drivetrain_loss) / 100)
-        crank_torque_Nm = (crank_power * 9549.29) / rpm
-        crank_torque = crank_torque_Nm
+        if is_loss_run:
+            power = power_kw + air_loss_kw + rolling_loss_kw
+        else:
+            power_with_losses = power_kw + air_loss_kw + rolling_loss_kw
+            if loss_run:
+                power_interp = interp1d(loss_run["speeds"], loss_run['losses'], kind='linear', fill_value="extrapolate")
+                power = power_with_losses - power_interp(speed_ms)
+            else:
+                power = power_with_losses / ((100 - drivetrain_loss) / 100)
+
+        crank_torque_Nm = None
+        crank_torque = None
+        if rpms:
+            crank_torque_Nm = (power * 9549.29) / rpm
+            crank_torque = crank_torque_Nm
 
         # Apply DIN 70020 if needed
-        if din_var.get():
-            crank_power, crank_torque = apply_din_correction(
-                crank_power, crank_torque, air_temp, air_pressure_mbar
+        if not is_loss_run and rpms and din_var.get():
+            crank_torque = apply_din_correction(
+                crank_torque, air_temp, air_pressure_mbar
             )
-
-        final_hp_torque_curve.append((rpm, crank_power, crank_torque))
+            power = apply_din_correction(
+                power, air_temp, air_pressure_mbar
+            )
+                
+        if rpms:
+            final_hp_torque_curve.append((rpm, power, crank_torque))
+        else:
+            final_hp_torque_curve.append((speed_ms * 3.6, power))
     return final_hp_torque_curve
 
 def print_graph_to_printer():
@@ -910,7 +990,7 @@ def get_speed_from_rpm(rpm):
 
     return speed
 
-def apply_din_correction(hp_measured, torque_measured, temp_c, pressure_mbar):
+def apply_din_correction(value, temp_c, pressure_mbar):
     """
     Apply DIN 70020 correction to measured HP and torque.
 
@@ -927,10 +1007,7 @@ def apply_din_correction(hp_measured, torque_measured, temp_c, pressure_mbar):
 
     correction_factor = (p0 / pressure_mbar) * (T / T0) ** 0.5
 
-    hp_corrected = hp_measured * correction_factor
-    torque_corrected = torque_measured * correction_factor
-
-    return hp_corrected, torque_corrected
+    return value * correction_factor
 
 def apply_theme_to_titlebar(root):
     version = sys.getwindowsversion()
@@ -1239,35 +1316,39 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     plt.close(fig)
     print_button.grid()
 
-def find_probable_runs(rows, filter_col_idx=2):
+def find_probable_runs(rows, filter_col_idx=2, direction="up"):
     runs = []
     current_start = None
-    prev_rpm = None
+    prev_value = None
 
     def save_run(start, end):
-        raw_run = rows[start:end]
-        runs.append(raw_run)
+        runs.append(rows[start:end])
 
     for i, row in enumerate(rows):
-        # Skip completely invalid rows
         if not row or len(row) <= filter_col_idx or row[filter_col_idx] == '' or not is_valid_numeric(row[filter_col_idx]):
             if current_start is not None:
                 save_run(current_start, i)
                 current_start = None
-            prev_rpm = None
+            prev_value = None
             continue
 
-        curr_rpm_or_speed = float(row[filter_col_idx])
+        curr_value = float(row[filter_col_idx])
 
-        if prev_rpm is None:
-            current_start = i
-        elif curr_rpm_or_speed < prev_rpm:
-            save_run(current_start, i)
+        if prev_value is None:
             current_start = i
 
-        prev_rpm = curr_rpm_or_speed
+        elif direction == "up":
+            if curr_value < prev_value:
+                save_run(current_start, i)
+                current_start = i
 
-    # Save any remaining run
+        elif direction == "down":
+            if curr_value > prev_value:
+                save_run(current_start, i)
+                current_start = i
+
+        prev_value = curr_value
+
     if current_start is not None:
         save_run(current_start, len(rows))
 
@@ -1280,6 +1361,13 @@ def load_log_file():
         log_file_path = file_path
         log_label.config(text=f"Loaded: {file_path}")
         submit(auto_load_col_fields=True)
+
+def load_loss_file():
+    global loss_file_path
+    file_path = filedialog.askopenfilename(title="Select a loss file", filetypes=[("CSV or log files", "*.csv *.log *.txt"), ("All files", "*.*")])
+    if file_path:
+        loss_file_path = file_path
+        handle_loss_file()
 
 def toggle_params(action=None):
     if action == "hide" or param_frame.winfo_ismapped():
@@ -1383,9 +1471,20 @@ entry_scx.grid(row=4, column=1, sticky="we", padx=5, pady=5)
 
 label_gearbox_loss = ttkb.Label(param_frame, text="Gearbox loss %")
 label_gearbox_loss.grid(row=5, column=0, sticky="e", padx=5, pady=5)
-entry_gearbox_loss = ttkb.Spinbox(param_frame, from_=0, to=30, increment=1)
+
+
+gearbox_loss_frame = ttkb.Frame(param_frame)
+gearbox_loss_frame.grid(row=5, column=1, sticky="ew")
+gearbox_loss_frame.grid_columnconfigure(0, weight=1)
+gearbox_loss_frame.grid_columnconfigure(1, weight=1)
+
+entry_gearbox_loss = ttkb.Spinbox(gearbox_loss_frame, from_=0, to=30, increment=1)
 entry_gearbox_loss.insert(0, "13")
-entry_gearbox_loss.grid(row=5, column=1, sticky="we", padx=5, pady=5)
+entry_gearbox_loss.grid(row=0, column=0, sticky="we", padx=5, pady=5)
+
+ttkb.Button(gearbox_loss_frame, text="Load gearbox loss file", command=load_loss_file).grid(row=0, column=1, sticky="ew")
+
+
 
 # --- Tire info field ---
 label_tire_size = ttkb.Label(param_frame, text="Tire size (e.g. 205/45 R16)")
@@ -1415,7 +1514,7 @@ use_imperial = tkinter.BooleanVar(value=False)
 
 unit_checkbox = ttkb.Checkbutton(
     param_frame,
-    text="Use imperial units",
+    text="Show in imperial units",
     variable=use_imperial
 )
 unit_checkbox.grid(row=9, column=1, sticky="we", padx=10, pady=10)
