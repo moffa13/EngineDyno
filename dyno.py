@@ -19,6 +19,22 @@ import pywinstyles, sys
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
+params = {
+    "run_log": {
+        "confirmed": False,
+        "timestamp_idx": None,
+        "rpm_idx": None,
+        "speed_idx": None,
+        "speed_unit": None
+    },
+
+    "loss_log": {
+        "confirmed": False,
+        "timestamp_idx": None,
+        "speed_idx": None,
+        "speed_unit": None
+    }
+}
 loss_run = None
 log_file_path = None
 loss_file_path = None
@@ -177,9 +193,11 @@ def on_compare_runs():
 # converts the raw run in csv mode in a dict with times, rpms and speeds keys
 # speed is converted to m/s
 def runs_to_dict(runs, important_cols):
-    col_time_i = entry_col_time_var.get()
-    col_speed_i = entry_col_speed_var.get()
-    col_rpm_i = entry_col_rpm_var.get()
+    global params
+
+    col_time_i = params["run_log"]["timestamp_idx"]
+    col_speed_i = params["run_log"]["speed_idx"]
+    col_rpm_i = params["run_log"]["rpm_idx"]
 
     runs_dict = []
 
@@ -590,7 +608,11 @@ def detect_columns_from_rows(rows):
     }
 
 # This function retrieves the column infos using the csv headers and sets the Spinbox accordingly
-def auto_set_columns_infos(rows):
+def auto_set_columns_infos(rows, log_uid, rpm_needed=True, can_speed_be_deduced_from_rpm=True):
+    global params
+    if params[log_uid]["confirmed"] == True:
+        return True
+
     col_infos = detect_columns_from_rows(rows)
 
     if col_infos['found']:
@@ -610,7 +632,7 @@ def auto_set_columns_infos(rows):
             entry_col_rpm_var.set(rpm_idx)
             deduce_rpm_from_speed_var.set(False)
             deduce_speed_from_rpm_var.set(True)
-        else:
+        elif rpm_needed:
             deduce_rpm_from_speed_var.set(True)
             deduce_speed_from_rpm_var.set(False)
             messagebox.showwarning("Submission Result",
@@ -631,16 +653,41 @@ def auto_set_columns_infos(rows):
                         "Vehicle speed was found in log, But couldn't determine the unit (mph or km/h).\n"
                         "Please check the 'speed in logs in mph' checkbox if that's the case."
                         )
-        else:
+        elif can_speed_be_deduced_from_rpm:
             deduce_speed_from_rpm_var.set(True)
             deduce_rpm_from_speed_var.set(False)
             messagebox.showwarning("Submission Result",
                                     "Vehicle speed not found in log, enabling auto deduce from RPM.\n"
                                     "Please fill in correct tire infos and gear infos."
                                     )
+        else:
+            messagebox.showwarning("Submission Result",
+                                    "Vehicle speed not found in log.\n"
+                                    "Please load a log containing speed info or manually set the column info."
+                                    )
         toggle_deduce_fields()
+
+        message = "Found columns\n" \
+        f"Timestamp: {col_infos['timestamp_idx']}\n" \
+        f"Speed: {col_infos['speed_idx']}\n" \
+        "Is it right ?"
+        res = messagebox.askquestion("Submission Result", message)
+        params[log_uid]["confirmed"] = True
+        params[log_uid]["timestamp_idx"] = col_infos['timestamp_idx']
+        params[log_uid]["speed_idx"] = col_infos['speed_idx']
+        if rpm_needed:
+            params[log_uid]["rpm_idx"] = col_infos['rpm_idx']
+        if res != 'yes':
+            messagebox.showinfo("Submission Result", "Please manually set time stamp column and vehicle speed column and load loss log again")
+            return False
+        else:
+            return True
+
     else:
         messagebox.showwarning("Submission Result", f"Column infos not found.\nBe sure to manually set them properly")
+        return False
+            
+    
 
 def handle_loss_file():
     global loss_run
@@ -650,8 +697,10 @@ def handle_loss_file():
             with open(loss_file_path, newline='') as csvfile:
                 reader = csv.reader(csvfile)
                 rows = list(reader)
-                auto_set_columns_infos(rows)
-
+                col_infos_good = auto_set_columns_infos(rows, 'loss_log', rpm_needed=False, can_speed_be_deduced_from_rpm=False)
+                if not col_infos_good:
+                    return
+                 
         except Exception as e:
             messagebox.showinfo("Submission Result", f"Error reading loss file: {e}")
             return
@@ -676,6 +725,13 @@ def handle_loss_file():
                 x, check_speed=True, check_rpms=False
             ), runs_dicts))
     
+    if not all_valid_runs:
+            
+        messagebox.showwarning("Submission Result",
+                                "No valid run was found.\nBe sure you entered correct column info values.\n"
+                                )
+        return
+    
     best_index = find_best_loss_run(all_valid_runs)
     best_run = all_valid_runs[best_index]
     power = analyse_run(best_run['times'], None, best_run['speeds'], is_loss_run=True)
@@ -699,7 +755,8 @@ def submit(auto_load_col_fields=False):
                     reader = csv.reader(csvfile)
                     rows = list(reader)
                     if auto_load_col_fields:
-                        auto_set_columns_infos(rows)
+                        if not auto_set_columns_infos(rows, 'run_log'):
+                            return
 
             except Exception as e:
                 messagebox.showinfo("Submission Result", f"Error reading log file: {e}")
@@ -711,19 +768,26 @@ def submit(auto_load_col_fields=False):
             return
 
         runs = []
+        log_cfg = params["run_log"]
         deduce_disabled = not deduce_speed_from_rpm_var.get() and not deduce_rpm_from_speed_var.get()
         deduce_speed = deduce_speed_from_rpm_var.get()
-        filter_col_idx = entry_col_rpm_var.get() if deduce_speed or deduce_disabled else entry_col_speed_var.get()
+        filter_col_idx = log_cfg["rpm_idx"] if deduce_speed or deduce_disabled else log_cfg["speed_idx"]
 
-        important_cols = [entry_col_time_var.get()]
+
+        important_cols = [log_cfg["timestamp_idx"]]
+
         if deduce_disabled:
-            important_cols.append(entry_col_rpm_var.get())
-            important_cols.append(entry_col_speed_var.get())
+            if "rpm_idx" in log_cfg:
+                important_cols.append(log_cfg["rpm_idx"])
+            important_cols.append(log_cfg["speed_idx"])
+
         elif deduce_speed_from_rpm_var.get():
-            important_cols.append(entry_col_rpm_var.get())
+            if "rpm_idx" in log_cfg:
+                important_cols.append(log_cfg["rpm_idx"])
+
         elif deduce_rpm_from_speed_var.get():
-            important_cols.append(entry_col_speed_var.get())
-        
+            important_cols.append(log_cfg["speed_idx"])
+                
         if rows:
             runs = find_probable_runs(rows, filter_col_idx=filter_col_idx) # Will get the run range
             runs = runs_to_dict(runs, important_cols)
@@ -1141,6 +1205,128 @@ def print_graph_compare(rpm_hp_torque_list, graph_frame, smoothing_window_size=5
     plt.close(fig)
     print_button.grid()
 
+def print_loss_graph_f(loss_run, graph_frame, smoothing_window_size=5):
+    global canvas_widget
+
+    """
+    Plot power loss vs vehicle speed.
+
+    loss_run = {
+        "speeds": [...],  # m/s
+        "losses": [...]   # HP/PS, usually negative
+    }
+    """
+
+    # Clear the frame
+    for widget in graph_frame.winfo_children():
+        widget.destroy()
+
+    # Extract data
+    speed_ms = np.array(loss_run["speeds"], dtype=float)
+    hp = np.abs(np.array(loss_run["losses"], dtype=float))
+
+    # Sort by speed, useful because decel logs often go high speed -> low speed
+    sort_idx = np.argsort(speed_ms)
+    speed_ms = speed_ms[sort_idx]
+    hp = hp[sort_idx]
+
+    # Convert speed for display
+    if use_imperial.get():
+        speed_display = speed_ms * 2.23694
+        speed_unit = "mph"
+        power_unit = "HP"
+    else:
+        speed_display = speed_ms * 3.6
+        speed_unit = "km/h"
+        power_unit = "PS"
+
+    def moving_average(y, window_size):
+        if len(y) < window_size:
+            return y
+        return np.convolve(y, np.ones(window_size) / window_size, mode="same")
+
+    # Smoothing only if user allowed it
+    if smooth_var.get():
+        hp = moving_average(hp, smoothing_window_size)
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    color_loss = "tab:red"
+
+    ax1.set_xlabel(f"Vehicle speed ({speed_unit})")
+    ax1.set_ylabel(f"Power loss ({power_unit})", color=color_loss)
+    ax1.plot(speed_display, hp, color=color_loss, label="Power loss")
+    ax1.tick_params(axis="y", labelcolor=color_loss)
+
+    ax1.spines["top"].set_visible(False)
+
+    # Peak label
+    loss_peak_idx = np.argmax(hp)
+
+    annot_peak_loss = ax1.annotate(
+        f"Peak loss: {hp[loss_peak_idx]:.1f} {power_unit} @ "
+        f"{speed_display[loss_peak_idx]:.1f} {speed_unit}",
+        textcoords="offset points",
+        xy=(speed_display[loss_peak_idx], hp[loss_peak_idx]),
+        xytext=(5, 10),
+        arrowprops=dict(facecolor=color_loss, arrowstyle="->"),
+        color=color_loss
+    )
+
+    # Dynamic annotation
+    annot_loss = ax1.annotate(
+        "",
+        xy=(0, 0),
+        xytext=(20, 20),
+        textcoords="offset points",
+        bbox=dict(boxstyle="round", fc="w"),
+        arrowprops=dict(arrowstyle="->"),
+        color="black"
+    )
+    annot_loss.set_visible(False)
+
+    if annot_loss not in fig.artists:
+        fig.artists.append(annot_loss)
+
+    def on_mouse_move(event):
+        if event.inaxes != ax1:
+            annot_loss.set_visible(False)
+            annot_peak_loss.set_visible(True)
+            fig.canvas.draw_idle()
+            return
+
+        x = event.xdata
+        if x is None:
+            return
+
+        annot_peak_loss.set_visible(False)
+
+        idx = np.abs(speed_display - x).argmin()
+
+        annot_loss.xy = (speed_display[idx], hp[idx])
+        annot_loss.set_text(
+            f"Loss: {hp[idx]:.1f} {power_unit} @ "
+            f"{speed_display[idx]:.1f} {speed_unit}"
+        )
+        annot_loss.set_visible(True)
+
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", on_mouse_move)
+
+    if canvas_widget:
+        canvas_widget.get_tk_widget().destroy()
+
+    canvas_widget = FigureCanvasTkAgg(fig, master=graph_frame)
+
+    fig.tight_layout()
+    canvas_widget.draw()
+    canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+
+    plt.close(fig)
+    print_button.grid()
+
 def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
 
     global canvas_widget
@@ -1356,18 +1542,47 @@ def find_probable_runs(rows, filter_col_idx=2, direction="up"):
 
 def load_log_file():
     global log_file_path
+    old_log_file_path = log_file_path
     file_path = filedialog.askopenfilename(title="Select log file", filetypes=[("CSV or log files", "*.csv *.log *.txt"), ("All files", "*.*")])
     if file_path:
+        # if we load a new log loss, tell the program the idx might have changed
+        if file_path != old_log_file_path:
+            params["run_log"]["confirmed"] = False
         log_file_path = file_path
         log_label.config(text=f"Loaded: {file_path}")
         submit(auto_load_col_fields=True)
 
+def toggle_loss_file():
+    global loss_run
+    if loss_run:
+        unload_loss_file()
+        load_loss_file_button.config(text="Load gearbox loss file")
+    else:
+        load_loss_file()
+        if loss_run:
+            load_loss_file_button.config(text="Unload gearbox loss file")
+
 def load_loss_file():
     global loss_file_path
+    old_loss_file_path = loss_file_path
     file_path = filedialog.askopenfilename(title="Select a loss file", filetypes=[("CSV or log files", "*.csv *.log *.txt"), ("All files", "*.*")])
     if file_path:
+        # if we load a new log loss, tell the program the idx might have changed
+        if file_path != old_loss_file_path:
+            params["loss_log"]["confirmed"] = False
         loss_file_path = file_path
         handle_loss_file()
+
+
+def unload_loss_file():
+    global loss_file_path
+    global loss_run
+
+    if not loss_run:
+        messagebox.showwarning('Info', 'No loss log loaded')
+
+    loss_file_path = None
+    loss_run = None
 
 def toggle_params(action=None):
     if action == "hide" or param_frame.winfo_ismapped():
@@ -1475,16 +1690,26 @@ label_gearbox_loss.grid(row=5, column=0, sticky="e", padx=5, pady=5)
 
 gearbox_loss_frame = ttkb.Frame(param_frame)
 gearbox_loss_frame.grid(row=5, column=1, sticky="ew")
-gearbox_loss_frame.grid_columnconfigure(0, weight=1)
-gearbox_loss_frame.grid_columnconfigure(1, weight=1)
+gearbox_loss_frame.grid_columnconfigure(0, weight=0)
+gearbox_loss_frame.grid_columnconfigure(1, weight=0)
+gearbox_loss_frame.grid_columnconfigure(2, weight=0)
 
 entry_gearbox_loss = ttkb.Spinbox(gearbox_loss_frame, from_=0, to=30, increment=1)
 entry_gearbox_loss.insert(0, "13")
 entry_gearbox_loss.grid(row=0, column=0, sticky="we", padx=5, pady=5)
+entry_gearbox_loss.config(width=4)
 
-ttkb.Button(gearbox_loss_frame, text="Load gearbox loss file", command=load_loss_file).grid(row=0, column=1, sticky="ew")
 
+load_loss_file_button = ttkb.Button(gearbox_loss_frame, text="Load gearbox loss file", command=toggle_loss_file)
+load_loss_file_button.grid(row=0, column=1, sticky="ew")
 
+def print_loss_graph():
+    if loss_run:
+        print_loss_graph_f(loss_run, graph_frame)
+        toggle_params('hide')
+
+print_loss_button = ttkb.Button(gearbox_loss_frame, text="Print loss graph", command=print_loss_graph)
+print_loss_button.grid(row=0, column=2, sticky="ew")
 
 # --- Tire info field ---
 label_tire_size = ttkb.Label(param_frame, text="Tire size (e.g. 205/45 R16)")
