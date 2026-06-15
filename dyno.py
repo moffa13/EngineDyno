@@ -509,7 +509,7 @@ def find_best_loss_run(runs):
 def is_valid_numeric(value):
     try:
         value = float(value)
-        return value > 0  # Or >= 0 depending on what you want
+        return value >= 0 
     except (ValueError, TypeError):
         return False
 
@@ -537,14 +537,58 @@ def detect_columns_from_rows(rows):
     """
 
     # Keywords for header detection
-    keywords = {
+    '''keywords = {
         "timestamp": [r"\btime\b", r"stamp", r"timestamp"],
         "rpm": [r"engine\s*speed", r"^rpm$", r"/min"],
         "speed": [r"\bspeed\b", r"vehicle\s*speed", r"km/h", r"mph", r"kmph", r"kmh"]
+    }'''
+
+    keywords = {
+        "timestamp": [
+            r"timestamp",
+            r"time\s*stamp",
+            r"elapsed\s*time",
+            r"elapsed",
+            r"(?<![a-zA-Z0-9])time(?![a-zA-Z0-9])",
+            r"\bseconds?\b",
+            r"\bsec\b",
+            r"\bmilliseconds?\b",
+            r"\bms\b",
+            r"\bdatetime\b",
+            r"\bdate\b"
+        ],
+
+        "rpm": [
+            r"engine\s*speed",
+            r"engine[_\s-]*rpm",
+            r"(?<![a-zA-Z0-9])rpm(?![a-zA-Z0-9])",
+            r"/min",
+            r"\brevs?\b",
+            r"\beng(?:ine)?\s*speed\b",
+            r"\bn\s*\[?rpm\]?\b"
+        ],
+
+        "speed": [
+            r"vehicle\s*speed",
+            r"veh\s*speed",
+            r"road\s*speed",
+            r"car\s*speed",
+            r"wheel\s*speed",
+            r"(?<![a-zA-Z0-9])speed(?![a-zA-Z0-9])",
+            r"\bvelocity\b",
+            r"\bvss\b",
+            r"\bkm/h\b",
+            r"\bkmh\b",
+            r"\bkmph\b",
+            r"\bkph\b",
+            r"\bmph\b",
+            r"\bgeschwindigkeit\b",
+            r"\bvitesse\b"
+        ]
     }
 
     exclusions = {
-        "speed": [r"engine\s*speed"]
+        "speed": [r"engine\s*speed", r"\beng\s*speed\b"]
     }
     
     def is_header_row(row):
@@ -716,11 +760,11 @@ def handle_loss_file():
         messagebox.showinfo("Submission Result", "No loss file loaded.")
         return
 
-    time_col = 1
-    speed_col = 3
+    time_col = params["loss_log"]["timestamp_idx"]
+    speed_col = params["loss_log"]["speed_idx"]
     important_cols = [time_col, speed_col]
     runs_dicts = []
-    runs = find_probable_runs(rows, filter_col_idx=3, direction="down") # Will get the run range
+    runs = find_probable_runs(rows, filter_col_idx=speed_col, direction="down") # Will get the run range
     for run in runs:
         run = sanitize_run(run, important_cols)
         r = {
