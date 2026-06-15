@@ -50,6 +50,48 @@ The time stamp, vehicle speed, and RPM columns refer to the VCDS log columns:
 
 ⚠️ **Be careful to have all data in the same group** — otherwise, data retrieval could lead to inconsistencies (e.g. not reading RPM at the same time as vehicle speed).
 
+## Gearbox Loss File
+
+The program supports the use of a **gearbox loss file** to apply a speed-dependent drivetrain loss model instead of a fixed drivetrain loss percentage.
+
+By default, drivetrain losses are calculated using the value entered in the **Drivetrain Loss (%)** field. While this method is simple and works reasonably well, real drivetrain losses are not constant and generally increase with vehicle speed.
+
+A gearbox loss file is generated from a coast-down log. During the dyno calculation, the software interpolates between the recorded points and automatically applies the corresponding drivetrain loss at each speed.
+
+### Required Data
+
+The source log can be any supported format and may contain additional columns.
+
+It only needs to contain at least:
+
+* Timestamp
+* Vehicle speed
+
+The column names do not matter, as the software allows you to manually select which columns contain the required data.
+
+### How to Create a Gearbox Loss File
+
+1. Find a flat and safe road.
+2. Accelerate the vehicle to a sufficiently high speed.
+3. Shift into neutral or fully disengage the clutch.
+4. Let the vehicle coast down naturally without braking.
+5. Record a log containing timestamp and vehicle speed.
+6. Import the log into EngineDyno and use the **Generate Gearbox Loss File** function.
+
+The software will calculate the drivetrain losses from the deceleration rate and generate a gearbox loss file that can later be reused for dyno calculations.
+
+### VCDS Example
+
+With VCDS, a simple way to record vehicle speed is by logging the ABS controller, which provides a reliable vehicle speed signal independent of engine RPM.
+
+### Notes
+
+* For best results, perform the test on a flat road with minimal wind.
+* Multiple runs in opposite directions can help reduce the influence of road slope and wind.
+* The generated file can usually be reused as long as the vehicle configuration remains unchanged (gearbox, differential, tires, wheel bearings, etc.).
+* When a gearbox loss file is loaded, it overrides the fixed drivetrain loss percentage.
+
+
 ## Auto deduce speed from RPM
 
 If you do not have the speed data recorded into your log, you can check the "Deduce speed from RPM" option

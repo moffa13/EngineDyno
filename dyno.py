@@ -198,6 +198,7 @@ def runs_to_dict(runs, important_cols):
     col_time_i = params["run_log"]["timestamp_idx"]
     col_speed_i = params["run_log"]["speed_idx"]
     col_rpm_i = params["run_log"]["rpm_idx"]
+    is_speed_mph = True if params["run_log"]["rpm_idx"] == "mph" else False
 
     runs_dict = []
 
@@ -223,7 +224,7 @@ def runs_to_dict(runs, important_cols):
             if deduce_speed_from_rpm_var.get():
                 speed = get_speed_from_rpm(rpm) / 3.6
             else:
-                conversion_factor = 2.237 if speed_log_mph_var.get() else 3.6
+                conversion_factor = 2.237 if is_speed_mph else 3.6
                 speed = float(elem[col_speed_i]) / conversion_factor
 
             
@@ -667,14 +668,21 @@ def auto_set_columns_infos(rows, log_uid, rpm_needed=True, can_speed_be_deduced_
                                     )
         toggle_deduce_fields()
 
-        message = "Found columns\n" \
-        f"Timestamp: {col_infos['timestamp_idx']}\n" \
-        f"Speed: {col_infos['speed_idx']}\n" \
-        "Is it right ?"
-        res = messagebox.askquestion("Submission Result", message)
+        
         params[log_uid]["confirmed"] = True
         params[log_uid]["timestamp_idx"] = col_infos['timestamp_idx']
         params[log_uid]["speed_idx"] = col_infos['speed_idx']
+        params[log_uid]["speed_unit"] = "mph" if speed_log_mph_var.get() else "kph"
+
+        message = "Found columns\n" \
+        f"Timestamp: {col_infos['timestamp_idx']}\n" \
+        f"Speed: {col_infos['speed_idx']}\n" \
+        f"Speed unit: {params[log_uid]["speed_unit"]}\n"
+        if rpm_needed: message += f"RPM: {col_infos['rpm_idx']}\n"
+        message += "Is it right ?"
+        res = messagebox.askquestion("Submission Result", message)
+        
+        
         if rpm_needed:
             params[log_uid]["rpm_idx"] = col_infos['rpm_idx']
         if res != 'yes':
@@ -1556,11 +1564,14 @@ def toggle_loss_file():
     global loss_run
     if loss_run:
         unload_loss_file()
+        entry_gearbox_loss.config(state="enabled")
         load_loss_file_button.config(text="Load gearbox loss file")
     else:
         load_loss_file()
         if loss_run:
+            entry_gearbox_loss.config(state="disabled")
             load_loss_file_button.config(text="Unload gearbox loss file")
+
 
 def load_loss_file():
     global loss_file_path
@@ -1701,7 +1712,7 @@ entry_gearbox_loss.config(width=4)
 
 
 load_loss_file_button = ttkb.Button(gearbox_loss_frame, text="Load gearbox loss file", command=toggle_loss_file)
-load_loss_file_button.grid(row=0, column=1, sticky="ew")
+load_loss_file_button.grid(row=0, column=1, sticky="ew", padx=5)
 
 def print_loss_graph():
     if loss_run:
@@ -1709,7 +1720,7 @@ def print_loss_graph():
         toggle_params('hide')
 
 print_loss_button = ttkb.Button(gearbox_loss_frame, text="Print loss graph", command=print_loss_graph)
-print_loss_button.grid(row=0, column=2, sticky="ew")
+print_loss_button.grid(row=0, column=2, sticky="ew", padx=5)
 
 # --- Tire info field ---
 label_tire_size = ttkb.Label(param_frame, text="Tire size (e.g. 205/45 R16)")
@@ -1742,7 +1753,7 @@ unit_checkbox = ttkb.Checkbutton(
     text="Show in imperial units",
     variable=use_imperial
 )
-unit_checkbox.grid(row=9, column=1, sticky="we", padx=10, pady=10)
+unit_checkbox.grid(row=8, column=3, sticky="e", padx=10, pady=10)
 
 speed_log_mph_var = tkinter.BooleanVar(value=False)
 
@@ -1752,25 +1763,25 @@ speed_mph_checkbox = ttkb.Checkbutton(
     variable=speed_log_mph_var,
     command=critical_value_changed
 )
-speed_mph_checkbox.grid(row=6, column=3, sticky="we", padx=10, pady=10)
+speed_mph_checkbox.grid(row=6, column=3, sticky="e", padx=10, pady=10)
 
 # Apply DIN correction checkbox
 din_var = tkinter.BooleanVar()
 din_var.set(True)
 din_checkbox = ttkb.Checkbutton(param_frame, text="Apply DIN correction", variable=din_var)
-din_checkbox.grid(row=7, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+din_checkbox.grid(row=7, column=3, columnspan=2, sticky="e", padx=5, pady=5)
 
 # Apply smoothing checkbox
 smooth_var = tkinter.BooleanVar()
 smooth_var.set(True)
 smooth_checkbox = ttkb.Checkbutton(param_frame, text="Apply graph smoothing", variable=smooth_var, command=toggle_window_size_param)
-smooth_checkbox.grid(row=8, column=3, columnspan=2, sticky="w", padx=5, pady=5)
+smooth_checkbox.grid(row=8, column=2, columnspan=2, sticky="w", padx=5, pady=5)
 
 label_window_size = ttkb.Label(param_frame, text="Smoothing window size")
-label_window_size.grid(row=9, column=3, sticky="w", padx=5, pady=5)
+label_window_size.grid(row=9, column=0, sticky="e", padx=5, pady=5)
 window_size_var = tkinter.IntVar(value=5)
 window_size_spinbox = ttkb.Spinbox(param_frame, from_=2, to=10, textvariable=window_size_var, width=5)
-window_size_spinbox.grid(row=9, column=3, sticky="e", padx=5, pady=5)
+window_size_spinbox.grid(row=9, column=1, sticky="we", padx=5, pady=5)
 
 # Apply point interpolation checkbox
 '''interpolate_var = tkinter.BooleanVar()
