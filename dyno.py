@@ -903,6 +903,7 @@ def analyse_run(times, rpms, speeds, is_loss_run=False):
     rolling_coeff = float(entry_crr.get())
     scx = float(entry_scx.get())
     drivetrain_loss = float(entry_gearbox_loss.get())
+    overestimated_loss = False
 
     if drivetrain_loss == 100:
         drivetrain_loss = 99.9
@@ -914,7 +915,7 @@ def analyse_run(times, rpms, speeds, is_loss_run=False):
         # All the cool calculated values in order to extract two values, rpm and hp => torque
         delta_time = float(times[i]) - float(times[i-1])
         rpm = None
-        if rpms:
+        if rpms is not None:
             rpm = float(rpms[i])
 
 
@@ -933,6 +934,8 @@ def analyse_run(times, rpms, speeds, is_loss_run=False):
         rolling_loss_kw = car_weight * rolling_coeff * gravity * speed_ms * 0.001
         if is_loss_run:
             power = power_kw + air_loss_kw + rolling_loss_kw
+            if power > 0:
+                overestimated_loss = True
         else:
             power_with_losses = power_kw + air_loss_kw + rolling_loss_kw
             if loss_run:
@@ -943,12 +946,12 @@ def analyse_run(times, rpms, speeds, is_loss_run=False):
 
         crank_torque_Nm = None
         crank_torque = None
-        if rpms:
+        if rpms is not None:
             crank_torque_Nm = (power * 9549.29) / rpm
             crank_torque = crank_torque_Nm
 
         # Apply DIN 70020 if needed
-        if not is_loss_run and rpms and din_var.get():
+        if not is_loss_run and rpms is not None and din_var.get():
             crank_torque = apply_din_correction(
                 crank_torque, air_temp, air_pressure_mbar
             )
@@ -956,10 +959,18 @@ def analyse_run(times, rpms, speeds, is_loss_run=False):
                 power, air_temp, air_pressure_mbar
             )
                 
-        if rpms:
+        if rpms is not None:
             final_hp_torque_curve.append((rpm, power, crank_torque))
         else:
             final_hp_torque_curve.append((speed_ms * 3.6, power))
+    if overestimated_loss:
+        warning = (
+            "Warning: calculated mechanical loss is negative.\n"
+            "Aerodynamic + rolling losses are higher than measured coastdown loss.\n"
+            "Possible causes: downhill road, tailwind, overestimated SCx/air density/Crr,\n"
+            "or noisy speed data."
+        )
+        messagebox.showwarning("Loss error", warning)
     return final_hp_torque_curve
 
 def print_graph_to_printer():
@@ -1275,7 +1286,7 @@ def print_loss_graph_f(loss_run, graph_frame, smoothing_window_size=5):
 
     # Extract data
     speed_ms = np.array(loss_run["speeds"], dtype=float)
-    hp = np.abs(np.array(loss_run["losses"], dtype=float))
+    hp = -np.array(loss_run["losses"], dtype=float)
 
     # Sort by speed, useful because decel logs often go high speed -> low speed
     sort_idx = np.argsort(speed_ms)
