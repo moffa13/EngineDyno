@@ -152,19 +152,19 @@ def apply_update():
 def validate_rows(run, min_run_size=6, min_run_time=1, min_rpm_range=500, min_rpm_allowed=1500, max_rpm=20000, max_speed=500, check_speed=True, check_rpms=True):
 
     if check_rpms:
-        min_rpm = min(run['rpms'])
-        max_rpm = max(run['rpms'])
+        run_min_rpm = min(run['rpms'])
+        run_max_rpm = max(run['rpms'])
         
         if any(rpm < 0 or rpm > max_rpm for rpm in run['rpms']):
             return False
 
-        if max_rpm - min_rpm < min_rpm_range: # too small rpm range
+        if run_max_rpm - run_min_rpm < min_rpm_range: # too small rpm range
+            return False
+
+        if run_max_rpm < min_rpm_allowed: # max rpm in the run is too low
             return False
 
     total_time = run['times'][-1] - run['times'][0]
-        
-    if max_rpm < min_rpm_allowed: # max rpm in the run is too low
-        return False
     
     if len(run['times']) < min_run_size: # not enough data points in the run
         return False
@@ -198,7 +198,7 @@ def runs_to_dict(runs, important_cols):
     col_time_i = params["run_log"]["timestamp_idx"]
     col_speed_i = params["run_log"]["speed_idx"]
     col_rpm_i = params["run_log"]["rpm_idx"]
-    is_speed_mph = True if params["run_log"]["rpm_idx"] == "mph" else False
+    is_speed_mph = params["run_log"]["speed_unit"] == "mph"
 
     runs_dict = []
 
@@ -490,7 +490,7 @@ def select_run(index):
 def find_best_run(runs):
     if len(runs) == 0: return None
     def score(run):
-        return (max(run['rpms']) - min(run['rpms'])) * (len(run) ** 0.5)
+        return (max(run['rpms']) - min(run['rpms'])) * (len(run['times']) ** 0.5)
     
     return max(range(len(runs)), key=lambda i: score(runs[i]))
 
@@ -502,7 +502,7 @@ def find_best_loss_run(runs):
         speed_range = max(run['speeds']) - min(run['speeds'])
         max_speed = max(run['speeds'])
 
-        return speed_range * (len(run) ** 0.5) * (max_speed ** 0.3)
+        return speed_range * (len(run['times']) ** 0.5) * (max_speed ** 0.3)
 
     return max(range(len(runs)), key=lambda i: score(runs[i]))
 
@@ -764,7 +764,7 @@ def handle_loss_file():
     speed_col = params["loss_log"]["speed_idx"]
     important_cols = [time_col, speed_col]
     runs_dicts = []
-    runs = find_probable_runs(rows, filter_col_idx=speed_col, direction="down") # Will get the run range
+    runs = find_probable_runs(rows, filter_col_idx=speed_col, direction="down", tolerance=3) # Will get the run range
     for run in runs:
         run = sanitize_run(run, important_cols)
         r = {
@@ -841,7 +841,8 @@ def submit(auto_load_col_fields=False):
             important_cols.append(log_cfg["speed_idx"])
                 
         if rows:
-            runs = find_probable_runs(rows, filter_col_idx=filter_col_idx) # Will get the run range
+            filter_tolerance = 50 if filter_col_idx == log_cfg["rpm_idx"] else 3  # rpm or speed units
+            runs = find_probable_runs(rows, filter_col_idx=filter_col_idx, tolerance=filter_tolerance) # Will get the run range
             runs = runs_to_dict(runs, important_cols)
         else:
             # If file is empty, reload should not trigger that function again
@@ -1565,41 +1566,63 @@ def print_graph(rpm_hp_torque, graph_frame, smoothing_window_size=5):
     plt.close(fig)
     print_button.grid()
 
-def find_probable_runs(rows, filter_col_idx=2, direction="up"):
-    runs = []
-    current_start = None
-    prev_value = None
+def find_probable_runs(rows, filter_col_idx=2, direction="up", tolerance=50):
+    """
+    Split the log into monotonic runs (rising for "up", falling for "down").
 
-    def save_run(start, end):
-        runs.append(rows[start:end])
+    A run is only broken when the value moves back by more than `tolerance`
+    from the extreme reached so far, so sensor noise / quantization
+    (e.g. 3219 -> 3218 rpm) does not cut a pull into small pieces.
+    Each run is cut at its extreme point (the dropped tail is discarded)
+    and its flat/backwards leading part is trimmed.
+    """
+    runs = []
+    sign = 1 if direction == "up" else -1
+
+    current_start = None
+    extreme_value = None
+    extreme_idx = None
+
+    def save_run(start, end_inclusive):
+        segment = rows[start:end_inclusive + 1]
+        if not segment:
+            return
+        # Trim the leading part: start at the last opposite extreme
+        # (lowest point before the climb for "up", highest for "down")
+        values = [float(r[filter_col_idx]) * sign for r in segment]
+        lowest = min(values)
+        trim = max(i for i, v in enumerate(values) if v == lowest)
+        runs.append(segment[trim:])
 
     for i, row in enumerate(rows):
         if not row or len(row) <= filter_col_idx or row[filter_col_idx] == '' or not is_valid_numeric(row[filter_col_idx]):
             if current_start is not None:
-                save_run(current_start, i)
+                save_run(current_start, extreme_idx)
                 current_start = None
-            prev_value = None
             continue
 
         curr_value = float(row[filter_col_idx])
 
-        if prev_value is None:
+        if current_start is None:
             current_start = i
+            extreme_value = curr_value
+            extreme_idx = i
+            continue
 
-        elif direction == "up":
-            if curr_value < prev_value:
-                save_run(current_start, i)
-                current_start = i
-
-        elif direction == "down":
-            if curr_value > prev_value:
-                save_run(current_start, i)
-                current_start = i
-
-        prev_value = curr_value
+        if (curr_value - extreme_value) * sign >= 0:
+            # Still progressing in the run direction (or equal)
+            extreme_value = curr_value
+            extreme_idx = i
+        elif (extreme_value - curr_value) * sign > tolerance:
+            # Real reversal: close the run at its extreme, start a new one here
+            save_run(current_start, extreme_idx)
+            current_start = i
+            extreme_value = curr_value
+            extreme_idx = i
+        # else: small backwards step within tolerance, ignore it
 
     if current_start is not None:
-        save_run(current_start, len(rows))
+        save_run(current_start, extreme_idx)
 
     return runs
 
